@@ -21,6 +21,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include "ui.h"
+#include "ui_config.h"
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -95,6 +98,29 @@ const char CONFIG_PATH[] = "/ATARISIO.CFG";
 #define SIO_UART_RX_PIN 17
 #define SIO_COMMAND_PIN 26
 // The microSD card is on SDIO.
+#elif defined(BOARD_FLOPPY_SIO_RP2350B)
+// The custom RP2350B board (floppy-rp2350b-pcb); selection and the OLED and
+// encoder pins are in ui_config.h.
+#define DENSITY_PIN 8      // IDC 2
+#define INDEX_PIN 2        // IDC 8
+#define SELECT_PIN 9       // IDC 12
+#define MOTOR_PIN 10       // IDC 16
+#define DIR_PIN 11         // IDC 18
+#define STEP_PIN 12        // IDC 20
+#define WRDATA_PIN 13      // IDC 22
+#define WRGATE_PIN 14      // IDC 24
+#define TRK0_PIN 4         // IDC 26
+#define PROT_PIN 5         // IDC 28
+#define READ_PIN 3         // IDC 30
+#define SIDE_PIN 15        // IDC 32
+#define READY_PIN 6        // IDC 34
+#define SIO_UART_TX_PIN 16 // UART0, through the open-drain buffer
+#define SIO_UART_RX_PIN 17
+#define SIO_COMMAND_PIN 26
+// The microSD card is on SDIO (CLK 34, CMD 35, DAT0-3 36-39; card detect 40).
+#define PIN_SD_CLK 34
+#define PIN_SD_CMD 35
+#define PIN_SD_DAT0 36
 #else
 #error "Please set up pin definitions!"
 #endif
@@ -110,7 +136,11 @@ Adafruit_Floppy pcfloppy(DENSITY_PIN, INDEX_PIN, SELECT_PIN, MOTOR_PIN, DIR_PIN,
                          READ_PIN, SIDE_PIN, READY_PIN);
 #define FLOPPY_DRIVE (&pcfloppy)
 #endif
+#if defined(BOARD_FLOPPY_SIO_RP2350B)
+#define SD_CONFIG SdioConfig(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_DAT0, 3.0)
+#else
 #define SD_CONFIG SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(12))
+#endif
 #endif
 
 // ---------------------------------------------------------------------------
@@ -151,6 +181,13 @@ char line[LINE_LEN];
 size_t lineLen = 0;
 bool lineOverflow = false;
 
+#if defined(OLED_SDA_PIN)
+// While the user interface runs a request, the first line printed is kept to
+// show on the display if the request fails.
+char uiCapture[UI_MSG_LEN];
+bool uiCapturing = false;
+#endif
+
 static void out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void out(const char *fmt, ...) {
   char buf[160];
@@ -159,6 +196,16 @@ static void out(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   Serial.print(buf);
+#if defined(OLED_SDA_PIN)
+  if (uiCapturing && !uiCapture[0]) {
+    snprintf(uiCapture, sizeof(uiCapture), "%.*s", (int)sizeof(uiCapture) - 1,
+             buf);
+    size_t n = strlen(uiCapture);
+    while (n && (uiCapture[n - 1] == '\n' || uiCapture[n - 1] == ' ' ||
+                 uiCapture[n - 1] == ','))
+      uiCapture[--n] = 0;
+  }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +377,21 @@ static int floppyUnit() {
 
 // The floppy operations below block for seconds to minutes and own the drive,
 // so take the floppy off the SIO bus meanwhile and put it back afterwards.
+#if defined(OLED_SDA_PIN)
+static void uiBusy(const char *what); // nullptr clears
+#else
+static inline void uiBusy(const char *) {}
+#endif
+
+// Tells the user interface that core 0 is busy for a while.
+struct BusyScope {
+  explicit BusyScope(const char *what) { uiBusy(what); }
+  ~BusyScope() { uiBusy(nullptr); }
+};
+
 class FloppyBusy {
 public:
-  FloppyBusy() : unit_(floppyUnit()) {
+  explicit FloppyBusy(const char *what) : busy_(what), unit_(floppyUnit()) {
     if (unit_ >= 0)
       sio.detach(unit_ + 1);
     Serial.println("The Atari cannot use the drives until this finishes.");
@@ -343,6 +402,7 @@ public:
   }
 
 private:
+  BusyScope busy_;
   int unit_;
 };
 
@@ -372,11 +432,11 @@ static bool unmountUnit(uint8_t u) {
 
 static bool mountImage(uint8_t u, const char *path) {
   if (!sdReady) {
-    Serial.println("No SD card.");
+    out("No SD card.\n");
     return false;
   }
   if (strlen(path) >= PATH_LEN) {
-    Serial.println("Path too long.");
+    out("Path too long.\n");
     return false;
   }
   // Two units on one file would each cache its header; a format through one
@@ -428,6 +488,7 @@ static bool mountImage(uint8_t u, const char *path) {
 }
 
 static bool mountFloppy(uint8_t u) {
+  BusyScope busy("Mounting floppy");
   int other = floppyUnit();
   if (other >= 0 && other != u) {
     out("The floppy is already D%d:\n", other + 1);
@@ -462,6 +523,19 @@ static bool mountUnit(uint8_t u, const char *what) {
 // comment line.
 // ---------------------------------------------------------------------------
 
+static char *skipBlanks(char *p) {
+  while (isBlank(*p))
+    p++;
+  return p;
+}
+
+// Trim trailing blanks (including CR and LF) in place.
+static void trimEnd(char *p) {
+  size_t n = strlen(p);
+  while (n && isBlank(p[n - 1]))
+    p[--n] = 0;
+}
+
 static void loadConfig() {
   FsFile f = sd.open(CONFIG_PATH, O_RDONLY);
   if (!f) {
@@ -470,15 +544,20 @@ static void loadConfig() {
   }
   char buf[LINE_LEN];
   while (f.fgets(buf, sizeof(buf)) > 0) {
-    char *w[2];
-    int n = split(buf, w, 2);
-    if (n == 0 || w[0][0] == '#')
+    char *p = skipBlanks(buf);
+    if (!*p || *p == '#')
       continue;
-    if (n == 2 && (w[0][0] == 'D' || w[0][0] == 'd') &&
-        parseUnit(w[0] + 1) >= 0) {
-      mountUnit(parseUnit(w[0] + 1), w[1]);
+    char *rest = p;
+    while (*rest && !isBlank(*rest))
+      rest++;
+    if (*rest)
+      *rest++ = 0;
+    rest = skipBlanks(rest);
+    trimEnd(rest); // the path is the rest of the line and may contain spaces
+    if ((p[0] == 'D' || p[0] == 'd') && parseUnit(p + 1) >= 0 && *rest) {
+      mountUnit(parseUnit(p + 1), rest);
     } else {
-      out("%s: ignored line \"%s\"\n", CONFIG_PATH, w[0]);
+      out("%s: ignored line \"%s\"\n", CONFIG_PATH, p);
     }
   }
   f.close();
@@ -486,7 +565,7 @@ static void loadConfig() {
 
 static void cmdSave() {
   if (!sdReady) {
-    Serial.println("No SD card.");
+    out("No SD card.\n");
     return;
   }
   FsFile f = sd.open(CONFIG_PATH, O_WRONLY | O_CREAT | O_TRUNC);
@@ -536,7 +615,7 @@ static void cmdHelp() {
 
 static void cmdLs(const char *dir) {
   if (!sdReady) {
-    Serial.println("No SD card.");
+    out("No SD card.\n");
     return;
   }
   FsFile d = sd.open(dir);
@@ -556,12 +635,22 @@ static void cmdLs(const char *dir) {
   }
 }
 
-static void cmdMount(char **w, int n) {
-  int u = n == 3 ? parseUnit(w[1]) : -1;
-  if (u < 0)
+// `mount <1-4> <path>|floppy`: the path is the rest of the line, so it may
+// contain spaces.
+static void cmdMount(char *args) {
+  char *unitWord = skipBlanks(args);
+  char *path = unitWord;
+  while (*path && !isBlank(*path))
+    path++;
+  if (*path)
+    *path++ = 0;
+  path = skipBlanks(path);
+  trimEnd(path);
+  int u = parseUnit(unitWord);
+  if (u < 0 || !*path)
     Serial.println("usage: mount <1-4> <path>|floppy");
   else
-    mountUnit(u, w[2]);
+    mountUnit(u, path);
 }
 
 static void cmdUmount(char **w, int n) {
@@ -812,7 +901,7 @@ static void cmdDump(char **w, int n) {
         "overwrite; .atx keeps copy protection)");
     return;
   }
-  FloppyBusy busy;
+  FloppyBusy busy("Dumping floppy");
   if (hasExtension(w[1], ".atx"))
     dumpFloppyAtx(w[1]);
   else if (hasExtension(w[1], ".atr"))
@@ -912,7 +1001,7 @@ static void cmdWrite(char **w, int n) {
     Serial.println("usage: write <path> yes   (erases the floppy)");
     return;
   }
-  FloppyBusy busy;
+  FloppyBusy busy("Writing floppy");
   FsFile f = sd.open(w[1], O_RDONLY);
   bool atx = f && isAtxFile(f, w[1]);
   f.close();
@@ -934,7 +1023,7 @@ static void cmdFormat(char **w, int n) {
                    "drive).");
     return;
   }
-  FloppyBusy busy;
+  FloppyBusy busy("Formatting");
   Serial.println("Formatting...");
   out("%s\n", resultName(atariFloppy.format(g)));
 }
@@ -952,6 +1041,11 @@ static void cmdDrive(char **w, int n) {
 }
 
 static void runCommand(char *s) {
+  char *first = skipBlanks(s);
+  if (!strncasecmp(first, "mount", 5) && isBlank(first[5])) {
+    cmdMount(first + 5);
+    return;
+  }
   char *w[4];
   int n = split(s, w, 4);
   if (n == 0)
@@ -960,8 +1054,6 @@ static void runCommand(char *s) {
     cmdHelp();
   else if (!strcasecmp(w[0], "ls"))
     cmdLs(n > 1 ? w[1] : "/");
-  else if (!strcasecmp(w[0], "mount"))
-    cmdMount(w, n);
   else if (!strcasecmp(w[0], "umount"))
     cmdUmount(w, n);
   else if (!strcasecmp(w[0], "status"))
@@ -1008,6 +1100,190 @@ static void pollConsole() {
 }
 
 // ---------------------------------------------------------------------------
+// Local user interface (core 0 half)
+//
+// The OLED and encoder run on core 1 (ui.cpp). That core never touches SdFat,
+// the mounts or the floppy: it posts requests that are served here, between
+// sio.poll() calls, and reads a status snapshot published from here. Folder
+// listings are read a few entries per loop pass so the SIO ACK deadline is
+// never at risk. Mounting uses the same functions as the console.
+// ---------------------------------------------------------------------------
+#if defined(OLED_SDA_PIN)
+static_assert(UI_PATH_LEN == PATH_LEN, "ui.h and the sketch disagree");
+
+const uint32_t UI_STATUS_MS = 100;
+const uint32_t UI_LIST_BUDGET_US = 2000; // time spent listing per loop pass
+const uint32_t UI_ACTIVE_MS = 400;
+
+FsFile uiDir;
+bool uiListing = false;
+uint32_t uiListId = 0;
+uint32_t uiStatusAt = 0;
+
+static const char *baseName(const char *path) {
+  const char *s = strrchr(path, '/');
+  return s ? s + 1 : path;
+}
+
+static bool uiBusyOn = false;
+static char uiBusyText[sizeof(UiStatus::busyText)];
+
+static void uiFillStatus(UiStatus &s) {
+  memset(&s, 0, sizeof(s));
+  s.busy = uiBusyOn;
+  snprintf(s.busyText, sizeof(s.busyText), "%s", uiBusyText);
+  for (uint8_t i = 0; i < UNITS; i++) {
+    s.unit[i].source = (uint8_t)mounts[i].source; // same order as UiSource
+    snprintf(s.unit[i].name, sizeof(s.unit[i].name), "%s",
+             baseName(mounts[i].path));
+  }
+  const Adafruit_AtariSIO::Stats &st = sio.stats();
+  s.frames = st.frames;
+  s.lastCommand = st.lastCommand;
+  s.lastUnit = st.lastUnit;
+  s.lastAux = st.lastAux;
+  s.lastResult = st.lastResult;
+  s.cylinder = 0xFF;
+  if (floppyUnit() >= 0) {
+    s.floppyMounted = true;
+    s.floppyReady = atariFloppy.ready();
+    atari_geometry_t g = atariFloppy.geometry();
+    atari_density_t d = atari_track_density(&g);
+    s.density = d == ATARI_DENSITY_OTHER ? 3 : (uint8_t)d;
+    s.sides = g.sides;
+    s.tracks = g.tracks;
+    s.cylinder = atariFloppy.currentCylinder();
+    s.head = atariFloppy.currentHead();
+    s.floppyMotor = atariFloppy.motorSpinning();
+    s.floppyActive = s.floppyMotor &&
+                     millis() - atariFloppy.lastAccessMillis() < UI_ACTIVE_MS;
+  }
+}
+
+// Called around long console commands: publishes right away, because core 0
+// will not get back to the periodic update until the command ends.
+static void uiBusy(const char *what) {
+  uiBusyOn = what != nullptr;
+  snprintf(uiBusyText, sizeof(uiBusyText), "%s", what ? what : "");
+  UiStatus s;
+  uiFillStatus(s);
+  uiPublishStatus(s);
+}
+
+static void uiBeginList(const UiRequest &r) {
+  if (!sdReady) {
+    uiListEnd(r.id, false, "No SD card");
+    return;
+  }
+  uiDir = sd.open(r.path);
+  if (!uiDir || !uiDir.isDir()) {
+    uiDir.close();
+    uiListEnd(r.id, false, "Cannot open folder");
+    return;
+  }
+  uiListing = true;
+  uiListId = r.id;
+}
+
+// Folders and image files only; names starting with '.' (such as the "._"
+// files macOS leaves) and names too long for the display are skipped. At most
+// one entry is added per call, and the call gives up after UI_LIST_BUDGET_US,
+// so the SIO engine is never kept waiting long.
+static void uiStepList() {
+  uint32_t t0 = micros();
+  do {
+    FsFile e;
+    if (!e.openNext(&uiDir, O_RDONLY)) {
+      bool failed = uiDir.getError() != 0; // card pulled or unreadable
+      uiDir.close();
+      uiListing = false;
+      uiListEnd(uiListId, !failed, failed ? "Card read error" : "");
+      return;
+    }
+    char name[UI_NAME_LEN];
+    bool named = e.getName(name, sizeof(name)) && name[0] && name[0] != '.' &&
+                 strlen(name) < sizeof(name) - 1;
+    bool isDir = e.isDir();
+    bool want = named && (isDir || hasImageExtension(name));
+    e.close();
+    if (want) {
+      if (!uiListAdd(uiListId, name, isDir)) { // list full: truncated
+        uiDir.close();
+        uiListing = false;
+        uiListEnd(uiListId, true, "");
+      }
+      return;
+    }
+  } while (micros() - t0 < UI_LIST_BUDGET_US);
+}
+
+static void uiRun(const UiRequest &r) {
+  char msg[UI_MSG_LEN];
+  uiCapture[0] = 0;
+  uiCapturing = true;
+  bool ok = true;
+  switch (r.kind) {
+  case UI_REQ_MOUNT:
+    ok = mountUnit(r.unit, r.path);
+    if (ok)
+      snprintf(msg, sizeof(msg), "D%u mounted\n%.40s", r.unit + 1,
+               baseName(r.path));
+    break;
+  case UI_REQ_MOUNT_FLOPPY:
+    ok = mountUnit(r.unit, "floppy");
+    if (ok)
+      snprintf(msg, sizeof(msg), "D%u: floppy%s", r.unit + 1,
+               atariFloppy.ready() ? "" : "\nno disk yet");
+    break;
+  case UI_REQ_UMOUNT:
+    snprintf(msg, sizeof(msg),
+             unmountUnit(r.unit) ? "D%u detached" : "D%u was empty",
+             r.unit + 1);
+    break;
+  case UI_REQ_SAVE:
+    cmdSave();
+    ok = !strncmp(uiCapture, "Saved", 5);
+    snprintf(msg, sizeof(msg), "%s", ok ? "Mounts saved" : uiCapture);
+    break;
+  default:
+    ok = false;
+    break;
+  }
+  uiCapturing = false;
+  if (!ok)
+    snprintf(msg, sizeof(msg), "%s", uiCapture[0] ? uiCapture : "Failed");
+  uiRequestDone(r.id, ok, msg);
+}
+
+static void uiService() {
+  uint32_t now = millis();
+  if (now - uiStatusAt >= UI_STATUS_MS) {
+    uiStatusAt = now;
+    UiStatus s;
+    uiFillStatus(s);
+    uiPublishStatus(s);
+  }
+  if (uiListing) {
+    uiStepList();
+    return;
+  }
+  UiRequest r;
+  if (!uiTakeRequest(&r))
+    return;
+  if (r.kind == UI_REQ_LIST)
+    uiBeginList(r);
+  else
+    uiRun(r);
+}
+
+// Core 1 runs the display and the encoder, with its own 8 KB stack
+// (arduino-pico reads this flag when it starts core 1).
+bool core1_separate_stack = true;
+void setup1() { uiSetup1(); }
+void loop1() { uiLoop1(); }
+#endif // OLED_SDA_PIN
+
+// ---------------------------------------------------------------------------
 // Arduino entry points
 // ---------------------------------------------------------------------------
 
@@ -1030,6 +1306,20 @@ void setup() {
   pinMode(FLOPPY_ENABLE_PIN, OUTPUT);
   digitalWrite(FLOPPY_ENABLE_PIN, LOW); // after setting the direction
 #endif
+#if defined(ARDUINO_ADAFRUIT_FLOPPSY_RP2040)
+  // Keep the on-board display deselected so it never answers on the SD bus.
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+#endif
+  // Start the SD card before anything that may claim a PIO. SdFat's PIO SDIO
+  // takes the first free PIO and moves its GPIO base to 16, which fails if the
+  // floppy code already holds one; the floppy code in turn only uses PIOs with
+  // GPIO base 0. Adafruit_Floppy::begin() does not claim a PIO, the first flux
+  // capture does, so this is safe on every board.
+  sdReady = sd.begin(SD_CONFIG);
+#if defined(STATUS_LED_PIN)
+  pinMode(STATUS_LED_PIN, OUTPUT);
+#endif
   if (!FLOPPY_DRIVE->begin() || !atariFloppy.begin(DRIVE_RPM, DRIVE_TRACKS))
     Serial.println("Floppy drive setup failed; the floppy is unavailable.");
 
@@ -1040,12 +1330,6 @@ void setup() {
   sio.begin();
   sio.setUltraSpeed(speedDivisor);
 
-#if defined(ARDUINO_ADAFRUIT_FLOPPSY_RP2040)
-  // Keep the on-board display deselected so it never answers on the SD bus.
-  pinMode(TFT_CS, OUTPUT);
-  digitalWrite(TFT_CS, HIGH);
-#endif
-  sdReady = sd.begin(SD_CONFIG);
   if (sdReady)
     loadConfig();
   else
@@ -1057,4 +1341,28 @@ void loop() {
   sio.poll();
   atariFloppy.idle();
   pollConsole();
+#if defined(OLED_SDA_PIN) || defined(STATUS_LED_PIN)
+  uint32_t frames = sio.stats().frames;
+#endif
+#if defined(OLED_SDA_PIN)
+  // Not in the pass where a command frame was just handled: the host expects
+  // the next one soon.
+  static uint32_t uiFrames = 0;
+  if (frames != uiFrames)
+    uiFrames = frames;
+  else
+    uiService();
+#endif
+#if defined(STATUS_LED_PIN)
+  // Blink on SIO traffic
+  static uint32_t ledFrames = 0, ledUntil = 0;
+  if (frames != ledFrames) {
+    ledFrames = frames;
+    ledUntil = millis() + 30;
+    digitalWrite(STATUS_LED_PIN, HIGH);
+  } else if (ledUntil && (int32_t)(millis() - ledUntil) >= 0) {
+    ledUntil = 0;
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
+#endif
 }

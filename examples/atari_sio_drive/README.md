@@ -17,11 +17,87 @@ Expect to debug wiring and timing.
 | Feather RP2040 / RP2350 HSTX | as `greaseweazle` | Serial1 (TX/RX pins) | D4 (GPIO6) | SPI breakout, CS = SCL |
 | Floppsy RP2040 | built in | UART0 on GPIO16 (TX) / GPIO17 (RX), the STEMMA QT pins | GPIO26 (SENSE1 JST) | on-board, CS = `PIN_CARD_CS` |
 | Floppsy RP2350 | built in | **unverified**, copied from the RP2040 | **unverified** | SDIO |
+| Custom RP2350B board (below) | IDC pins, see below | UART0 on GPIO16 (TX) / GPIO17 (RX) | GPIO26 | SDIO |
 
 The Floppsy RP2350 board package was not released when this was written; its
 SIO pins are guesses and `setup()` reports an error if the UART rejects them.
 All pins are in one block at the top of the sketch. Select the Adafruit TinyUSB
 stack under Tools > USB Stack.
+
+## Custom RP2350B board (OLED and encoder)
+
+For the `floppy-rp2350b-pcb` board: RP2350B, microSD on SDIO, a 1.3" SH1106
+OLED and a rotary encoder for a local user interface. Pins (all in the sketch
+and `ui_config.h`):
+
+| Function | GPIO |
+|---|---|
+| Floppy DENSITY, INDEX, SELECT, MOTOR, DIR, STEP | 8, 2, 9, 10, 11, 12 |
+| Floppy WRDATA, WRGATE, TRK0, PROT, READ, SIDE, READY | 13, 14, 4, 5, 3, 15, 6 |
+| SIO UART0 TX / RX, COMMAND | 16 / 17, 26 |
+| microSD SDIO CLK, CMD, DAT0 (DAT1-3 = 37-39), card detect | 34, 35, 36, 40 |
+| OLED SDA / SCL (I2C0, address 0x3C) | 28 / 29 |
+| Encoder A, B, switch (active low, external pull-ups) | 22, 23, 24 |
+| VBUS sense (ADC, 100k/27k), PD power good, status LED | 41, 43, 21 |
+| PSRAM chip select (QMI CS1) | 47 |
+
+**Selecting the board.** In the Arduino IDE choose Tools > Board > Raspberry Pi
+Pico/RP2040/RP2350 > **Generic RP2350**, then set Variant chip = RP2350B,
+PSRAM CS = GPIO 47, Flash size to match the board's W25Q128 (16MB), USB Stack =
+Adafruit TinyUSB. That board defines `ARDUINO_GENERIC_RP2350`, which selects
+the pin block automatically. With another board package, build with
+`-DFLOPPY_SIO_RP2350B_REVA`. The FQBN used for the compile checks is
+`rp2040:rp2040:generic_rp2350:variantchip=RP2350B,psramcs=GPIO47,flash=16777216_0,freq=150,arch=arm,dbgport=Disabled,dbglvl=None,usbstack=tinyusb`.
+The user interface needs the Adafruit SH110X library (and Adafruit GFX).
+The status LED (GPIO21) blinks on SIO traffic; the SD card is started before
+anything claims a PIO, because SdFat's PIO SDIO needs to move the PIO's GPIO
+base to 16 and the floppy code only uses PIOs with base 0.
+
+**Display options.** The board has an I2C OLED header (SDA 28, SCL 29, 0x3C) and a
+7-pin SPI OLED socket (SPI1: SCK 30, MOSI 31, CS 32 in software, DC 33,
+RES 27). Choose one with `OLED_TYPE` in `ui_config.h` (or build with
+`-DOLED_TYPE=n`): `OLED_SH1106_I2C` (1, default), `OLED_SH1106_SPI` (2),
+`OLED_SSD1306_SPI` (3), `OLED_SSD1309_SPI` (4, 2.42" modules). SPI runs at
+8 MHz on hardware SPI1. SSD1309 is driven by Adafruit_SSD1306, whose command
+set it shares; this was not tried on a real module. Needs the Adafruit SH110X
+and Adafruit SSD1306 libraries.
+
+**User interface.** Other boards have no UI and behave as before. It runs on
+core 1, so the SIO engine on core 0 is not delayed by the display. Core 1 never
+touches the SD card or the mounts: it sends requests (list a folder, mount,
+eject, save) that core 0 serves between SIO polls (folders a few entries per
+pass), and reads a status snapshot. Mounting from the UI is the same code as the
+`mount` console command, so the same rules apply; mounting the floppy spins the
+drive up and can take a few seconds, during which the Atari is not served.
+
+| Control | Action |
+|---|---|
+| Turn | scroll |
+| Press | select; on the status screen, open the menu |
+| Hold (0.6 s) | back: leaves the menu, browser or file menu, one level at a time |
+
+Screens:
+
+1. **Status**: D1 to D4 with the file name (`ATX` marks protected images),
+   `FLOPPY` or `--`; the last SIO command (`>` while active), and, when the
+   floppy is mounted, its type (SD/ED/DD, SS/DS, tracks), current track and
+   side, and MOTOR / BUSY. The last line shows the PD voltage (VBUS sense).
+2. **Menu**: Browse SD card, Floppy on D1 to D4, Eject D1 to D4, Save mounts
+   (writes `/ATARISIO.CFG` like `save`), Back. `*` marks the unit that holds
+   the floppy.
+3. **Browser**: folders and `.atr`/`.xfd`/`.atx` files, `..` to go up. Names
+   starting with `.` or longer than 62 characters are not listed, and a folder
+   shows at most 160 entries.
+4. **File menu**: Mount on D1 to D4 (`*` = unit in use, it is replaced), Cancel.
+
+While core 0 is inside a long command (`dump`, `write`, `format`, floppy
+mount) the status screen and the waiting screen show "Busy: ..."; hold the
+button to leave the waiting screen (the request is withdrawn, or its late
+result is ignored). A `+` at the end of the browser title means the folder has
+more than 160 entries.
+
+Errors such as "Cannot open ..." appear as a message for a few seconds or until
+a press. Menus return to the status screen after a minute without input.
 
 ## SIO wiring
 
@@ -106,14 +182,17 @@ The resulting geometry is printed.
 | `speed <divisor>\|off` | Ultra Speed POKEY divisor (default 10, about 38400 baud) |
 | `save` | Write the current mounts to `/ATARISIO.CFG` |
 
-Paths cannot contain spaces. `dump`, `write` and `format` block for seconds to
+`mount` and the config file take the rest of the line as the path, so those
+paths may contain spaces (no quoting; leading and trailing blanks are dropped).
+The other commands take a single word as the path. `dump`, `write` and `format` block for seconds to
 minutes; the floppy is taken off the SIO bus meanwhile and the Atari cannot use
 the drives until they finish (a floppy mounted on a unit is reattached
 afterwards).
 
 ## Config file
 
-`/ATARISIO.CFG` on the SD card is read at startup. One mount per line, `#`
+`/ATARISIO.CFG` on the SD card is read at startup. One mount per line (the path
+is the rest of the line and may contain spaces), `#`
 starts a comment line:
 
 ```
