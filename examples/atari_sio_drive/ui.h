@@ -16,7 +16,7 @@
 
 #if defined(OLED_SDA_PIN)
 
-#define UI_UNITS 4
+#define UI_MAX_UNITS 15    // D1..D15, same as MAX_UNITS in the sketch
 #define UI_PATH_LEN 96     // same as PATH_LEN in the sketch
 #define UI_NAME_LEN 64     // longest file name the browser shows
 #define UI_MSG_LEN 64      // result text for the display
@@ -29,17 +29,22 @@ enum UiSource : uint8_t {
   UI_SRC_FLOPPY
 };
 
+// Same order as Mode in the sketch.
+enum UiMode : uint8_t { UI_MODE_VIRTUAL, UI_MODE_PHYSICAL, UI_MODE_BYPASS };
+
 struct UiUnitInfo {
   uint8_t source; // UiSource
+  uint8_t mode;   // UiMode
   char name[24];  // file name without the folder, cut off
 };
 
 struct UiStatus {
-  UiUnitInfo unit[UI_UNITS];
+  uint8_t unitCount; // drives emulated or bypassed, 1..UI_MAX_UNITS
+  UiUnitInfo unit[UI_MAX_UNITS];
   // SIO
   uint32_t frames;     // valid command frames so far
   uint8_t lastCommand; // character
-  uint8_t lastUnit;    // 1..8
+  uint8_t lastUnit;    // 1..15
   uint16_t lastAux;
   uint8_t lastResult; // character
   // Physical floppy
@@ -59,16 +64,18 @@ struct UiStatus {
 
 enum UiRequestKind : uint8_t {
   UI_REQ_NONE,
-  UI_REQ_LIST,         // list folder `path`
-  UI_REQ_MOUNT,        // mount image `path` on unit
-  UI_REQ_MOUNT_FLOPPY, // mount the floppy on unit
-  UI_REQ_UMOUNT,       // detach unit
-  UI_REQ_SAVE          // write the config file
+  UI_REQ_LIST,      // list folder `path`
+  UI_REQ_MOUNT,     // mount image `path` on unit
+  UI_REQ_UMOUNT,    // detach unit
+  UI_REQ_SET_MODE,  // set unit to the UiMode in `arg`
+  UI_REQ_SET_UNITS, // set the number of drives to `arg`
+  UI_REQ_SAVE       // write the config file
 };
 
 struct UiRequest {
   uint8_t kind;
-  uint8_t unit; // 0..3
+  uint8_t unit; // 0..14
+  uint8_t arg;  // mode or drive count
   uint32_t id;
   char path[UI_PATH_LEN];
 };
@@ -84,7 +91,8 @@ struct UiDirEntry {
 void uiPublishStatus(const UiStatus &s);
 /** Take the pending request, if any; true if r was filled. */
 bool uiTakeRequest(UiRequest *r);
-/** Finish a mount/umount/save request; msg is shown on the display. */
+/** Finish a mount, umount, mode, drive count or save request; msg is shown on
+ * the display. */
 void uiRequestDone(uint32_t id, bool ok, const char *msg);
 /** Add one entry of the folder being listed; false if the list is full. */
 bool uiListAdd(uint32_t id, const char *name, bool isDir);

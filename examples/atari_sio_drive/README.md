@@ -1,9 +1,31 @@
 # Atari SIO drive
 
-Turns a supported board into Atari 8-bit disk drives D1: to D4: on the SIO bus.
-Each unit serves either an ATR/XFD/ATX image from a microSD card or a real Atari
-floppy in a PC (Shugart) drive. Everything is configured over the USB serial
-console at 115200 baud.
+Turns a supported board into Atari 8-bit disk drives D1: to D15: on the SIO bus
+(SIO device IDs $31 to $3F, SpartaDOS X drives A to O). Four drives are emulated
+by default; `units` changes that. Each unit is virtual (an ATR/XFD/ATX image
+from a microSD card), physical (a real Atari floppy in the PC (Shugart) drive on
+the board) or bypass (left to another drive on the SIO chain). Everything is
+configured over the USB serial console at 115200 baud.
+
+## Drive modes
+
+Each unit has a mode, set with `mode` (or `mount <n> floppy`, the config file or
+the menu):
+
+* **virtual**: an emulated drive served from an image on the SD card. With no
+  image mounted it stays silent, like a switched-off drive, so an Atari with
+  nothing in D1: goes on to BASIC instead of repeating BOOT ERROR.
+* **physical**: served by the floppy drive on the board. There is one, so only
+  one unit can be physical; setting a second one fails and names the unit that
+  has it. With no disk inserted the unit answers "not ready".
+* **bypass**: the board never answers this ID, so another drive on the SIO chain
+  with that number works. A bypassed unit refuses mounts, so it cannot shadow
+  the real drive by accident.
+
+Units beyond `units` behave like bypass. Lowering `units` detaches the units
+beyond the new count and resets them to virtual. If a high-speed drive on the
+chain uses a different speed than `speed`, the board may need one retry to
+re-sync its autobaud after that drive's traffic.
 
 **Status: not tested on a real Atari.** It was validated only by host-side
 simulation of the SIO protocol and by compile checks on the CI platforms.
@@ -78,17 +100,24 @@ drive up and can take a few seconds, during which the Atari is not served.
 
 Screens:
 
-1. **Status**: D1 to D4 with the file name (`ATX` marks protected images),
-   `FLOPPY` or `--`; the last SIO command (`>` while active), and, when the
-   floppy is mounted, its type (SD/ED/DD, SS/DS, tracks), current track and
-   side, and MOTOR / BUSY. The last line shows the PD voltage (VBUS sense).
-2. **Menu**: Browse SD card, Floppy on D1 to D4, Eject D1 to D4, Save mounts
-   (writes `/ATARISIO.CFG` like `save`), Back. `*` marks the unit that holds
-   the floppy.
+1. **Status**: four units at a time with the file name (`ATX` marks protected
+   images), `FLOPPY`, `bypass` or `--` (empty virtual unit); turn the knob to
+   scroll when more are emulated (`^` and `v` at the right edge show there are
+   more). Below: the last SIO command (`>` while active) and, when the floppy
+   is mounted, its type (SD/ED/DD, SS/DS, tracks), current track and side, and
+   MOTOR / BUSY. The last line shows the PD voltage (VBUS sense).
+2. **Menu**: Browse SD card, one item per unit (`D1 SDX.ATR`, `D2 FLOPPY`,
+   `D3 bypass`, `D4 --`), `Drives: N`, Save settings (writes `/ATARISIO.CFG`
+   like `save`), Back.
+   * A **unit screen** opens for a unit: Virtual, Physical (floppy), Bypass,
+     Eject, Back. `*` marks the current mode. Hold to go back.
+   * The **Drives screen** changes the number of drives: turn for 1 to 15,
+     press to apply, hold to cancel.
 3. **Browser**: folders and `.atr`/`.xfd`/`.atx` files, `..` to go up. Names
    starting with `.` or longer than 62 characters are not listed, and a folder
    shows at most 160 entries.
-4. **File menu**: Mount on D1 to D4 (`*` = unit in use, it is replaced), Cancel.
+4. **File menu**: Mount on each unit that is not set to bypass (`*` = unit in
+   use, it is replaced), Cancel.
 
 While core 0 is inside a long command (`dump`, `write`, `format`, floppy
 mount) the status screen and the waiting screen show "Busy: ..."; hold the
@@ -203,16 +232,18 @@ The resulting geometry is printed.
 |---|---|
 | `help` | List the commands |
 | `ls [dir]` | List folders and `.atr` / `.xfd` / `.atx` files with sizes |
-| `mount <1-4> <path>\|floppy` | Attach an image (read-write if possible, otherwise read-only; `.atx` files and files starting with `AT8X` are ATX and always read-only) or the physical floppy, which spins up and prints the detected density and measured RPM |
-| `umount <1-4>` | Detach a unit |
-| `status` | Per unit: source, "ATX" for protected images, geometry (sector size, tracks, sides), write protection; ATX drive model; SIO statistics; Ultra Speed setting |
+| `units [1-15]` | Show or set the number of drives (default 4). Lowering it detaches the units beyond it and resets them to virtual |
+| `mode <1-15> [virtual\|physical\|bypass]` | Show or set a unit's mode (`floppy` also means physical). `virtual` ejects the floppy of a physical unit or turns a bypassed unit into an empty virtual one, and keeps the image of a virtual unit; `physical` fails if another unit has the floppy; `bypass` detaches whatever is mounted |
+| `mount <unit> <path>\|floppy` | Attach an image (read-write if possible, otherwise read-only; `.atx` files and files starting with `AT8X` are ATX and always read-only) or the physical floppy, which spins up and prints the detected density and measured RPM. Refused for bypassed units and units beyond `units`. Units are written `1` to `15`, `D1` to `D15` or `D1:` |
+| `umount <unit>` | Detach a unit; it stays virtual and empty (a physical unit ejects the floppy) |
+| `status` | Per unit up to `units`: mode, source, "ATX" for protected images, geometry (sector size, tracks, sides), write protection; ATX drive model; SIO statistics; Ultra Speed setting |
 | `new <path> <fmt>` | Create a blank ATR (`<fmt>` as in Formats); refuses to overwrite |
 | `dump <path>` | `.atr`: copy the floppy to a new ATR with the detected geometry (both sides, 40 or 80 tracks). Prints progress per track side and the unreadable sectors, which are stored as zeros. `.atx`: a protected dump of a single-sided 40-track floppy; per track it prints the entry count and the duplicate, CRC, missing, deleted and weak counts. Refused for double-sided or 80-track media |
 | `write <path> yes` | `.atr`: copy an image onto the floppy, one verified track side at a time; the drive must be able to format that geometry. `.atx`: master the protected image (see Copy protection); prints entries, the largest push in angular units and failures per track. Needs the literal `yes` |
 | `format <fmt> yes` | Format the floppy; refused for geometries the drive cannot do (80 tracks need an 80-track drive). Needs the literal `yes` |
 | `drive 810\|1050` | Drive model whose timing ATX mounts use (default 1050) |
 | `speed <divisor>\|off` | Ultra Speed POKEY divisor (default 10, about 38400 baud) |
-| `save` | Write the current mounts to `/ATARISIO.CFG` |
+| `save` | Write the drive count, modes and mounts to `/ATARISIO.CFG` |
 
 `mount` and the config file take the rest of the line as the path, so those
 paths may contain spaces (no quoting; leading and trailing blanks are dropped).
@@ -223,14 +254,20 @@ afterwards).
 
 ## Config file
 
-`/ATARISIO.CFG` on the SD card is read at startup. One mount per line (the path
-is the rest of the line and may contain spaces), `#`
-starts a comment line:
+`/ATARISIO.CFG` on the SD card is read at startup and written by `save`. One
+setting per line, `#` starts a comment line. `units N` sets the drive count
+(wherever it appears; the default is 4). A `Dn` line sets a unit: `FLOPPY` (or
+`PHYSICAL`), `BYPASS`, `VIRTUAL` (empty), or the path of an image (the rest of
+the line, which may contain spaces). Lines for units beyond `units` are ignored
+with a message. Files with only `D1` to `D4` lines still work.
 
 ```
-# boot from the floppy, games on D2
-D1 FLOPPY
-D2 /games/mule.atr
+# SpartaDOS X on D1, the real floppy on D2, a real 1050 as D3
+units 6
+D1 /DOS/SDX.ATR
+D2 FLOPPY
+D3 BYPASS
+D5 /games/mule.atr
 ```
 
 ## Copy protection

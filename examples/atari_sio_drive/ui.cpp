@@ -198,7 +198,16 @@ static Event pollSwitch(uint32_t now) {
 
 namespace {
 
-enum Screen : uint8_t { S_STATUS, S_MENU, S_BROWSE, S_ACTION, S_WAIT, S_MSG };
+enum Screen : uint8_t {
+  S_STATUS,
+  S_MENU,
+  S_BROWSE,
+  S_ACTION,
+  S_UNIT,
+  S_DRIVES,
+  S_WAIT,
+  S_MSG
+};
 
 // The drawing code only uses Adafruit_GFX (through `gfx`); the few calls that
 // differ between the driver classes are in this block.
@@ -226,9 +235,17 @@ UiStatus st; // core 1's copy of the status
 uint32_t prevFrames = 0, tActivity = 0;
 char vbusText[6] = "";
 
+// status screen: first unit shown
+int statusTop = 0;
+
 // menus
 int menuSel = 0, menuTop = 0;
 int actionSel = 0, actionTop = 0;
+uint8_t actionUnit[UI_MAX_UNITS]; // unit of each "Mount on" row
+int actionCount = 0;              // rows before Cancel
+int unitSel = 0, unitTop = 0;
+int curUnit = 0;     // unit shown on the unit screen
+int drivesValue = 4; // value being edited on the drives screen
 
 // browser
 char dirPath[UI_PATH_LEN] = "/";
@@ -254,8 +271,12 @@ char msgText[UI_MSG_LEN] = "";
 Screen msgNext = S_STATUS;
 uint32_t msgSince = 0;
 
-const int MENU_ITEMS = 11; // Browse, 4 x floppy, 4 x eject, save, back
-const int ROWS = 7;        // list rows below the title
+const int STATUS_UNIT_ROWS = 4; // units shown at once on the status screen
+const int UNIT_ITEMS = 5;       // Virtual, Physical, Bypass, Eject, Back
+const int ROWS = 7;             // list rows below the title
+
+// Browse, one per unit, Drives, Save settings, Back
+int menuItems() { return st.unitCount + 4; }
 
 // ---- helpers --------------------------------------------------------------
 
@@ -303,10 +324,12 @@ uint32_t tryPost() {
   return g_req.id;
 }
 
-void request(uint8_t kind, uint8_t unit, const char *path, const char *text) {
+void request(uint8_t kind, uint8_t unit, uint8_t arg, const char *path,
+             const char *text) {
   memset(&want, 0, sizeof(want));
   want.kind = kind;
   want.unit = unit;
+  want.arg = arg;
   if (path)
     snprintf(want.path, sizeof(want.path), "%s", path);
   haveWant = true;
@@ -321,7 +344,7 @@ void listFolder(const char *path) {
   snprintf(prevPath, sizeof(prevPath), "%s", dirPath);
   snprintf(dirPath, sizeof(dirPath), "%s", path);
   loading = true;
-  request(UI_REQ_LIST, 0, path, "");
+  request(UI_REQ_LIST, 0, 0, path, "");
   dirty = true;
 }
 
@@ -363,32 +386,49 @@ void parentPath(char *out, size_t n) {
     *s = 0;
 }
 
+// What a unit holds, for a row with `room` characters left.
+void unitText(int u, char *buf, size_t n, int room) {
+  const UiUnitInfo &ui = st.unit[u];
+  if (ui.mode == UI_MODE_BYPASS)
+    snprintf(buf, n, "bypass");
+  else if (ui.source == UI_SRC_NONE)
+    snprintf(buf, n, "--");
+  else if (ui.source == UI_SRC_FLOPPY)
+    snprintf(buf, n, "FLOPPY");
+  else
+    snprintf(buf, n, "%.*s", room, ui.name);
+}
+
 void menuLabel(int i, char *buf, size_t n) {
+  int units = st.unitCount;
   if (i == 0) {
     snprintf(buf, n, "Browse SD card");
-  } else if (i <= UI_UNITS) {
-    snprintf(buf, n, "Floppy on D%d%s", i,
-             st.unit[i - 1].source == UI_SRC_FLOPPY ? " *" : "");
-  } else if (i <= 2 * UI_UNITS) {
-    const UiUnitInfo &u = st.unit[i - UI_UNITS - 1];
-    if (u.source == UI_SRC_NONE)
-      snprintf(buf, n, "Eject D%d (empty)", i - UI_UNITS);
-    else
-      snprintf(buf, n, "Eject D%d %.12s", i - UI_UNITS,
-               u.source == UI_SRC_FLOPPY ? "floppy" : u.name);
-  } else if (i == 2 * UI_UNITS + 1) {
-    snprintf(buf, n, "Save mounts");
+  } else if (i <= units) {
+    char t[24];
+    unitText(i - 1, t, sizeof(t), 20 - (i >= 10 ? 4 : 3));
+    snprintf(buf, n, "D%d %s", i, t);
+  } else if (i == units + 1) {
+    snprintf(buf, n, "Drives: %d", units);
+  } else if (i == units + 2) {
+    snprintf(buf, n, "Save settings");
   } else {
     snprintf(buf, n, "Back");
   }
 }
 
 void actionLabel(int i, char *buf, size_t n) {
-  if (i < UI_UNITS)
-    snprintf(buf, n, "Mount on D%d%s", i + 1,
-             st.unit[i].source != UI_SRC_NONE ? " *" : "");
+  if (i < actionCount)
+    snprintf(buf, n, "Mount on D%d%s", actionUnit[i] + 1,
+             st.unit[actionUnit[i]].source != UI_SRC_NONE ? " *" : "");
   else
     snprintf(buf, n, "Cancel");
+}
+
+void unitLabel(int i, char *buf, size_t n) {
+  static const char *const names[UNIT_ITEMS] = {"Virtual", "Physical (floppy)",
+                                                "Bypass", "Eject", "Back"};
+  bool current = i < 3 && st.unit[curUnit].mode == i;
+  snprintf(buf, n, "%s%s", names[i], current ? " *" : "");
 }
 
 void browseLabel(int i, char *buf, size_t n) {
@@ -424,23 +464,42 @@ void moveSel(int steps, int count, int *sel, int *top) {
 // ---- input ----------------------------------------------------------------
 
 void onMenuSelect(uint32_t now) {
+  int units = st.unitCount;
   if (menuSel == 0) {
     gotoScreen(S_BROWSE);
     listFolder(dirPath); // always reread: the card may have changed
-  } else if (menuSel <= UI_UNITS) {
-    char t[32];
-    snprintf(t, sizeof(t), "Floppy on D%d", menuSel);
-    request(UI_REQ_MOUNT_FLOPPY, menuSel - 1, nullptr, t);
-  } else if (menuSel <= 2 * UI_UNITS) {
-    char t[32];
-    snprintf(t, sizeof(t), "Eject D%d", menuSel - UI_UNITS);
-    request(UI_REQ_UMOUNT, menuSel - UI_UNITS - 1, nullptr, t);
-  } else if (menuSel == 2 * UI_UNITS + 1) {
-    request(UI_REQ_SAVE, 0, nullptr, "Saving");
+  } else if (menuSel <= units) {
+    curUnit = menuSel - 1;
+    unitSel = unitTop = 0;
+    gotoScreen(S_UNIT);
+  } else if (menuSel == units + 1) {
+    drivesValue = units < 1 ? 1 : units;
+    gotoScreen(S_DRIVES);
+  } else if (menuSel == units + 2) {
+    request(UI_REQ_SAVE, 0, 0, nullptr, "Saving");
   } else {
     gotoScreen(S_STATUS);
   }
   (void)now;
+}
+
+// Units a file can be mounted on: all but those set to bypass.
+void buildActionUnits() {
+  actionCount = 0;
+  for (int u = 0; u < st.unitCount && u < UI_MAX_UNITS; u++)
+    if (st.unit[u].mode != UI_MODE_BYPASS)
+      actionUnit[actionCount++] = (uint8_t)u;
+}
+
+void onUnitSelect() {
+  char t[32];
+  snprintf(t, sizeof(t), "D%d", curUnit + 1);
+  if (unitSel < 3)
+    request(UI_REQ_SET_MODE, curUnit, (uint8_t)unitSel, nullptr, t);
+  else if (unitSel == 3)
+    request(UI_REQ_UMOUNT, curUnit, 0, nullptr, t);
+  else
+    gotoScreen(S_MENU);
 }
 
 void onBrowseSelect(uint32_t now) {
@@ -469,7 +528,8 @@ void onBrowseSelect(uint32_t now) {
   } else {
     snprintf(pickPath, sizeof(pickPath), "%s", p);
     snprintf(pickName, sizeof(pickName), "%s", view[i].name);
-    actionSel = 0;
+    actionSel = actionTop = 0;
+    buildActionUnits();
     gotoScreen(S_ACTION);
   }
 }
@@ -477,13 +537,17 @@ void onBrowseSelect(uint32_t now) {
 void handleInput(int steps, Event evt, uint32_t now) {
   switch (screen) {
   case S_STATUS:
+    if (steps) {
+      statusTop += steps;
+      dirty = true; // drawStatus keeps it in range
+    }
     if (evt != EVT_NONE) {
       menuSel = menuTop = 0;
       gotoScreen(S_MENU);
     }
     break;
   case S_MENU:
-    moveSel(steps, MENU_ITEMS, &menuSel, &menuTop);
+    moveSel(steps, menuItems(), &menuSel, &menuTop);
     if (evt == EVT_LONG)
       gotoScreen(S_STATUS);
     else if (evt == EVT_SHORT)
@@ -500,13 +564,38 @@ void handleInput(int steps, Event evt, uint32_t now) {
     }
     break;
   case S_ACTION:
-    moveSel(steps, UI_UNITS + 1, &actionSel, &actionTop);
-    if (evt == EVT_LONG || (evt == EVT_SHORT && actionSel == UI_UNITS)) {
+    moveSel(steps, actionCount + 1, &actionSel, &actionTop);
+    if (evt == EVT_LONG || (evt == EVT_SHORT && actionSel >= actionCount)) {
       gotoScreen(S_BROWSE);
     } else if (evt == EVT_SHORT) {
       char t[32];
-      snprintf(t, sizeof(t), "Mount on D%d", actionSel + 1);
-      request(UI_REQ_MOUNT, actionSel, pickPath, t);
+      snprintf(t, sizeof(t), "Mount on D%d", actionUnit[actionSel] + 1);
+      request(UI_REQ_MOUNT, actionUnit[actionSel], 0, pickPath, t);
+    }
+    break;
+  case S_UNIT:
+    moveSel(steps, UNIT_ITEMS, &unitSel, &unitTop);
+    if (evt == EVT_LONG)
+      gotoScreen(S_MENU);
+    else if (evt == EVT_SHORT)
+      onUnitSelect();
+    break;
+  case S_DRIVES:
+    if (steps) {
+      drivesValue += steps;
+      if (drivesValue < 1)
+        drivesValue = 1;
+      if (drivesValue > UI_MAX_UNITS)
+        drivesValue = UI_MAX_UNITS;
+      dirty = true;
+    }
+    if (evt == EVT_LONG) {
+      gotoScreen(S_MENU);
+    } else if (evt == EVT_SHORT) {
+      if (drivesValue == st.unitCount)
+        gotoScreen(S_MENU);
+      else
+        request(UI_REQ_SET_UNITS, 0, (uint8_t)drivesValue, nullptr, "Drives");
     }
     break;
   case S_MSG:
@@ -582,6 +671,10 @@ void pollRequests(uint32_t now) {
       next = S_STATUS;
     else if (waitKind == UI_REQ_MOUNT)
       next = S_ACTION;
+    else if (waitKind == UI_REQ_SET_MODE || waitKind == UI_REQ_UMOUNT)
+      next = S_UNIT;
+    else if (waitKind == UI_REQ_SET_UNITS)
+      next = S_DRIVES;
     showMessage(text, next, now);
   }
 }
@@ -620,20 +713,42 @@ void drawList(const char *title, int count, int sel, int top,
   }
 }
 
+// A one-character scroll hint at the right edge of a status row.
+void drawHint(int row, char c) {
+  disp.setCursor(120, row * 8);
+  disp.print(c);
+}
+
 void drawStatus(uint32_t now) {
-  char b[28];
-  for (int i = 0; i < UI_UNITS; i++) {
+  char b[48];
+  int units = st.unitCount;
+  int maxTop = units > STATUS_UNIT_ROWS ? units - STATUS_UNIT_ROWS : 0;
+  if (statusTop > maxTop)
+    statusTop = maxTop;
+  if (statusTop < 0)
+    statusTop = 0;
+  for (int r = 0; r < STATUS_UNIT_ROWS && statusTop + r < units; r++) {
+    int i = statusTop + r;
     const UiUnitInfo &u = st.unit[i];
-    if (u.source == UI_SRC_NONE)
+    // Column 21 is left free for the scroll hint.
+    int w = 20 - (i >= 9 ? 4 : 3);
+    if (u.mode == UI_MODE_BYPASS)
+      snprintf(b, sizeof(b), "D%d bypass", i + 1);
+    else if (u.source == UI_SRC_NONE)
       snprintf(b, sizeof(b), "D%d --", i + 1);
     else if (u.source == UI_SRC_FLOPPY)
       snprintf(b, sizeof(b), "D%d FLOPPY%s", i + 1,
                st.floppyReady ? "" : " (no disk)");
+    else if (u.source == UI_SRC_ATX)
+      snprintf(b, sizeof(b), "D%d %-*.*s ATX", i + 1, w - 4, w - 4, u.name);
     else
-      snprintf(b, sizeof(b), "D%d %-14.14s%s", i + 1, u.name,
-               u.source == UI_SRC_ATX ? " ATX" : "");
-    text(i, b);
+      snprintf(b, sizeof(b), "D%d %.*s", i + 1, w, u.name);
+    text(r, b);
   }
+  if (statusTop > 0)
+    drawHint(0, '^');
+  if (statusTop < maxTop)
+    drawHint(STATUS_UNIT_ROWS - 1, 'v');
   if (st.frames) {
     snprintf(b, sizeof(b), "%cD%u %c %u %c",
              now - tActivity < ACTIVITY_MS ? '>' : ' ', st.lastUnit,
@@ -684,8 +799,8 @@ void render(uint32_t now) {
     drawStatus(now);
     break;
   case S_MENU:
-    clampScroll(MENU_ITEMS, &menuSel, &menuTop);
-    drawList("Menu", MENU_ITEMS, menuSel, menuTop, menuLabel);
+    clampScroll(menuItems(), &menuSel, &menuTop);
+    drawList("Menu", menuItems(), menuSel, menuTop, menuLabel);
     break;
   case S_BROWSE: {
     int n = browseItems();
@@ -708,9 +823,26 @@ void render(uint32_t now) {
     break;
   }
   case S_ACTION:
-    clampScroll(UI_UNITS + 1, &actionSel, &actionTop);
-    drawList(pickName, UI_UNITS + 1, actionSel, actionTop, actionLabel);
+    clampScroll(actionCount + 1, &actionSel, &actionTop);
+    drawList(pickName, actionCount + 1, actionSel, actionTop, actionLabel);
     break;
+  case S_UNIT: {
+    char title[16];
+    snprintf(title, sizeof(title), "D%d", curUnit + 1);
+    clampScroll(UNIT_ITEMS, &unitSel, &unitTop);
+    drawList(title, UNIT_ITEMS, unitSel, unitTop, unitLabel);
+    break;
+  }
+  case S_DRIVES: {
+    char b[24];
+    drawTitle("Drives");
+    snprintf(b, sizeof(b), "Drives: %d (D1-D%d)", drivesValue, drivesValue);
+    text(3, b);
+    text(5, "Turn = change");
+    text(6, "Press = apply");
+    text(7, "Hold = cancel");
+    break;
+  }
   case S_WAIT:
     drawTitle(waitText);
     if (st.busy) {
@@ -800,7 +932,8 @@ void uiLoop1() {
   pollRequests(now);
   if (screen == S_MSG && now - msgSince >= MESSAGE_MS)
     gotoScreen(msgNext);
-  if ((screen == S_MENU || screen == S_BROWSE || screen == S_ACTION) &&
+  if ((screen == S_MENU || screen == S_BROWSE || screen == S_ACTION ||
+       screen == S_UNIT || screen == S_DRIVES) &&
       now - lastInput >= IDLE_BACK_MS)
     gotoScreen(S_STATUS);
 

@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Adafruit Industries
 // SPDX-License-Identifier: MIT
 //
-// Atari 8-bit disk drives D1: to D4: on the SIO bus. Each unit serves either an
-// ATR/XFD/ATX image from the microSD card or a real Atari floppy in a PC drive.
-// Configure everything over the USB serial console (type "help").
+// Atari 8-bit disk drives D1: to D15: on the SIO bus (4 by default). Each unit
+// is virtual (an ATR/XFD/ATX image from the microSD card), physical (a real
+// Atari floppy in the PC drive on the board) or bypass (left to another drive
+// on the SIO chain). Configure everything over the USB serial console (type
+// "help").
 //
 // Validated only by host-side simulation and compile checks; not yet tried on a
 // real Atari. See README.md for wiring.
@@ -34,6 +36,10 @@
 // 300 RPM, 80 tracks). The library then detects 40- or 80-track media itself.
 const uint16_t DRIVE_RPM = 300;
 const uint8_t DRIVE_TRACKS = 40;
+
+// Number of drives (D1: to D<n>:) emulated at startup; 1 to 15. Change it at
+// run time with "units", or with a "units" line in the config file.
+const uint8_t DEFAULT_UNITS = 4;
 
 // Mounts are loaded from this file at startup, and written by "save".
 const char CONFIG_PATH[] = "/ATARISIO.CFG";
@@ -147,12 +153,21 @@ Adafruit_Floppy pcfloppy(DENSITY_PIN, INDEX_PIN, SELECT_PIN, MOTOR_PIN, DIR_PIN,
 // State
 // ---------------------------------------------------------------------------
 
-const uint8_t UNITS = 4;
+const uint8_t MAX_UNITS = 15; // SIO device IDs $31 to $3F
 const size_t PATH_LEN = 96;
 const size_t LINE_LEN = 128;
 const uint8_t DEFAULT_SPEED_DIVISOR = 10;
 
 enum Source : uint8_t { SRC_NONE, SRC_IMAGE, SRC_ATX, SRC_FLOPPY };
+
+// Who answers for a unit. Invariants: MODE_PHYSICAL if and only if the source
+// is SRC_FLOPPY; MODE_BYPASS means SRC_NONE and not attached to the engine;
+// units from unitCount on are SRC_NONE, MODE_VIRTUAL and not attached.
+enum Mode : uint8_t {
+  MODE_VIRTUAL,  // an image from the SD card, or silent while empty
+  MODE_PHYSICAL, // the floppy drive on the board
+  MODE_BYPASS    // never answered, so a drive on the SIO chain can be used
+};
 
 // Everything one image needs; the FsFile and its adaptor must stay put while
 // the ATR is mounted, so these are globals and never copied.
@@ -162,8 +177,9 @@ struct Mount {
   Adafruit_AtariATR atr;
   Adafruit_AtariATX atx; // protected images; read-only
   Source source;
+  Mode mode;
   char path[PATH_LEN];
-  Mount() : adaptor(file), source(SRC_NONE) { path[0] = 0; }
+  Mount() : adaptor(file), source(SRC_NONE), mode(MODE_VIRTUAL) { path[0] = 0; }
 };
 
 SdFs sd;
@@ -171,9 +187,10 @@ bool sdReady = false;
 Adafruit_AtariFloppy atariFloppy(FLOPPY_DRIVE); // one ~66 KB flux buffer
 Adafruit_AtariSIOUart sioPort(Serial1, SIO_COMMAND_PIN);
 Adafruit_AtariSIO sio(&sioPort);
-Mount mounts[UNITS];
-Mount copyImage;              // scratch image for new / dump / write
-atari_prot_track_t protTrack; // scratch for protected dump / master
+Mount mounts[MAX_UNITS];
+uint8_t unitCount = DEFAULT_UNITS; // units 1..unitCount are in use
+Mount copyImage;                   // scratch image for new / dump / write
+atari_prot_track_t protTrack;      // scratch for protected dump / master
 atari_drive_model_t driveModel = ATARI_DRIVE_1050; // timing of ATX mounts
 uint8_t speedDivisor = DEFAULT_SPEED_DIVISOR;
 
@@ -316,11 +333,28 @@ static uint16_t sectorFor(const atari_geometry_t &g, uint8_t t, uint8_t h,
   return 0;
 }
 
-// "1".."4" to a unit index 0..3, or -1.
+// "1".."15", "D1".."D15" or "D1:" (any case) to a unit index 0..14, or -1.
 static int parseUnit(const char *s) {
-  if (s[0] >= '1' && s[0] <= '0' + UNITS && s[1] == 0)
-    return s[0] - '1';
-  return -1;
+  bool d = *s == 'D' || *s == 'd';
+  if (d)
+    s++;
+  if (*s < '1' || *s > '9')
+    return -1;
+  int n = *s++ - '0';
+  if (*s >= '0' && *s <= '9')
+    n = n * 10 + (*s++ - '0');
+  if (d && *s == ':')
+    s++;
+  return *s || n > MAX_UNITS ? -1 : n - 1;
+}
+
+// False, with a message, if unit index u is beyond the drive count.
+static bool unitInUse(int u) {
+  if (u < unitCount)
+    return true;
+  out("D%d is not emulated (units %u). Raise it first: units %d\n", u + 1,
+      unitCount, u + 1);
+  return false;
 }
 
 static bool hasExtension(const char *name, const char *ext) {
@@ -369,7 +403,7 @@ static int split(char *s, char **words, int max) {
 }
 
 static int floppyUnit() {
-  for (uint8_t i = 0; i < UNITS; i++)
+  for (uint8_t i = 0; i < MAX_UNITS; i++)
     if (mounts[i].source == SRC_FLOPPY)
       return i;
   return -1;
@@ -426,6 +460,7 @@ static bool unmountUnit(uint8_t u) {
     atariFloppy.eject();
   }
   m.source = SRC_NONE;
+  m.mode = MODE_VIRTUAL;
   m.path[0] = 0;
   return true;
 }
@@ -441,7 +476,7 @@ static bool mountImage(uint8_t u, const char *path) {
   }
   // Two units on one file would each cache its header; a format through one
   // would leave the other reading at stale offsets.
-  for (uint8_t i = 0; i < UNITS; i++) {
+  for (uint8_t i = 0; i < MAX_UNITS; i++) {
     if (i != u && isFileSource(mounts[i].source) &&
         !strcasecmp(mounts[i].path, path)) {
       out("%s is already mounted as D%u:\n", path, i + 1);
@@ -497,6 +532,7 @@ static bool mountFloppy(uint8_t u) {
   unmountUnit(u);
   Mount &m = mounts[u];
   m.source = SRC_FLOPPY;
+  m.mode = MODE_PHYSICAL;
   sio.attach(u + 1, &atariFloppy);
   Serial.println("Spinning up the floppy drive...");
   if (atariFloppy.insert()) {
@@ -512,15 +548,83 @@ static bool mountFloppy(uint8_t u) {
 }
 
 static bool mountUnit(uint8_t u, const char *what) {
+  if (!unitInUse(u))
+    return false;
+  if (mounts[u].mode == MODE_BYPASS) {
+    out("D%u is set to bypass; `mode %u virtual` first\n", u + 1, u + 1);
+    return false;
+  }
   if (!strcasecmp(what, "floppy"))
     return mountFloppy(u);
   return mountImage(u, what);
 }
 
+// Detaches a unit and leaves it virtual and empty. False, with a message, if
+// the unit is not in use or is bypassed; true even if it was already empty.
+static bool umountUnit(uint8_t u) {
+  if (!unitInUse(u))
+    return false;
+  if (mounts[u].mode == MODE_BYPASS) {
+    out("D%u is bypassed (nothing to detach)\n", u + 1);
+    return false;
+  }
+  if (unmountUnit(u))
+    out("D%u: detached\n", u + 1);
+  else
+    out("D%u: was empty\n", u + 1);
+  return true;
+}
+
+static bool setMode(uint8_t u, Mode mode) {
+  if (!unitInUse(u))
+    return false;
+  Mount &m = mounts[u];
+  static const char *const names[] = {"virtual", "physical", "bypass"};
+  if (m.mode == mode) {
+    out("D%u: already %s\n", u + 1, names[mode]);
+    return true;
+  }
+  switch (mode) {
+  case MODE_VIRTUAL:
+    unmountUnit(u); // ejects the floppy; a bypassed unit is empty already
+    m.mode = MODE_VIRTUAL;
+    out("D%u: virtual, empty\n", u + 1);
+    return true;
+  case MODE_PHYSICAL:
+    return mountFloppy(u);
+  default:
+    unmountUnit(u);
+    m.mode = MODE_BYPASS;
+    out("D%u: bypass (left to other drives on the chain)\n", u + 1);
+    return true;
+  }
+}
+
+// Changes the number of drives. Units beyond the new count are detached and
+// become virtual.
+static void setUnitCount(uint8_t n) {
+  for (uint8_t i = n; i < unitCount; i++) {
+    Mount &m = mounts[i];
+    if (m.mode == MODE_BYPASS)
+      out("D%u: bypass cleared\n", i + 1);
+    else if (unmountUnit(i))
+      out("D%u: detached\n", i + 1);
+    m.mode = MODE_VIRTUAL;
+  }
+  unitCount = n;
+}
+
 // ---------------------------------------------------------------------------
-// Config file: lines of "D1 FLOPPY" or "D2 /path/file.atr" (.xfd and .atx
-// too, chosen by signature); '#' starts a
-// comment line.
+// Config file, one setting per line; '#' starts a comment line:
+//   units 6              number of drives, 1 to 15 (default DEFAULT_UNITS)
+//   D1 /path/file.atr    virtual unit with this image (.xfd and .atx too,
+//                        chosen by signature); the path is the rest of the
+//                        line and may contain spaces
+//   D2 FLOPPY            physical unit (PHYSICAL means the same)
+//   D3 BYPASS            left to another drive on the SIO chain
+//   D4 VIRTUAL           virtual and empty (same as no line)
+// "units" is read first, so it may appear anywhere. Lines for units beyond it
+// are ignored.
 // ---------------------------------------------------------------------------
 
 static char *skipBlanks(char *p) {
@@ -536,6 +640,32 @@ static void trimEnd(char *p) {
     p[--n] = 0;
 }
 
+// Splits a config line into its first word and the rest of the line; both are
+// trimmed, and the line is empty for blank lines and comments.
+static char *splitConfigLine(char *buf, char **rest) {
+  char *p = skipBlanks(buf);
+  if (*p == '#')
+    *p = 0;
+  *rest = p;
+  while (**rest && !isBlank(**rest))
+    (*rest)++;
+  if (**rest)
+    *(*rest)++ = 0;
+  *rest = skipBlanks(*rest);
+  trimEnd(*rest);
+  return p;
+}
+
+// Parses a drive count 1..15; false if it is anything else.
+static bool parseCount(const char *s, uint8_t *n) {
+  char *end;
+  long v = strtol(s, &end, 10);
+  if (end == s || *end || v < 1 || v > MAX_UNITS)
+    return false;
+  *n = (uint8_t)v;
+  return true;
+}
+
 static void loadConfig() {
   FsFile f = sd.open(CONFIG_PATH, O_RDONLY);
   if (!f) {
@@ -543,21 +673,44 @@ static void loadConfig() {
     return;
   }
   char buf[LINE_LEN];
+  // Pass 1: the drive count, so the unit lines can be checked against it.
   while (f.fgets(buf, sizeof(buf)) > 0) {
-    char *p = skipBlanks(buf);
-    if (!*p || *p == '#')
+    char *rest;
+    char *p = splitConfigLine(buf, &rest);
+    uint8_t n;
+    if (strcasecmp(p, "units"))
       continue;
-    char *rest = p;
-    while (*rest && !isBlank(*rest))
-      rest++;
-    if (*rest)
-      *rest++ = 0;
-    rest = skipBlanks(rest);
-    trimEnd(rest); // the path is the rest of the line and may contain spaces
-    if ((p[0] == 'D' || p[0] == 'd') && parseUnit(p + 1) >= 0 && *rest) {
-      mountUnit(parseUnit(p + 1), rest);
-    } else {
+    if (parseCount(rest, &n))
+      setUnitCount(n);
+    else
+      out("%s: units must be 1-%u, ignored \"%s\"\n", CONFIG_PATH, MAX_UNITS,
+          rest);
+  }
+  // Pass 2: the units.
+  f.seekSet(0);
+  while (f.fgets(buf, sizeof(buf)) > 0) {
+    char *rest;
+    char *p = splitConfigLine(buf, &rest);
+    if (!*p || !strcasecmp(p, "units"))
+      continue;
+    int u = (p[0] == 'D' || p[0] == 'd') ? parseUnit(p) : -1;
+    if (u < 0 || !*rest) {
       out("%s: ignored line \"%s\"\n", CONFIG_PATH, p);
+    } else if (u >= unitCount) {
+      out("%s: ignored line \"%s %s\" (units %u)\n", CONFIG_PATH, p, rest,
+          unitCount);
+    } else if (!strcasecmp(rest, "floppy") || !strcasecmp(rest, "physical")) {
+      setMode(u, MODE_PHYSICAL);
+    } else if (!strcasecmp(rest, "bypass")) {
+      setMode(u, MODE_BYPASS);
+    } else if (!strcasecmp(rest, "virtual")) {
+      setMode(u, MODE_VIRTUAL);
+    } else {
+      // A later line replaces an earlier BYPASS. A physical unit stays one
+      // until mountImage ejects the floppy, in case the mount fails first.
+      if (mounts[u].mode == MODE_BYPASS)
+        mounts[u].mode = MODE_VIRTUAL;
+      mountImage(u, rest);
     }
   }
   f.close();
@@ -573,10 +726,13 @@ static void cmdSave() {
     out("Cannot write %s\n", CONFIG_PATH);
     return;
   }
-  for (uint8_t i = 0; i < UNITS; i++) {
-    char buf[PATH_LEN + 8];
+  char buf[PATH_LEN + 8];
+  f.write(buf, snprintf(buf, sizeof(buf), "units %u\n", unitCount));
+  for (uint8_t i = 0; i < unitCount; i++) {
     int n = 0;
-    if (mounts[i].source == SRC_FLOPPY)
+    if (mounts[i].mode == MODE_BYPASS)
+      n = snprintf(buf, sizeof(buf), "D%u BYPASS\n", i + 1);
+    else if (mounts[i].source == SRC_FLOPPY)
       n = snprintf(buf, sizeof(buf), "D%u FLOPPY\n", i + 1);
     else if (isFileSource(mounts[i].source))
       n = snprintf(buf, sizeof(buf), "D%u %s\n", i + 1, mounts[i].path);
@@ -591,13 +747,33 @@ static void cmdSave() {
 // Console commands
 // ---------------------------------------------------------------------------
 
+static void helpLine(const char *cmd, const char *text) {
+  out("%-25s %s\n", cmd, text);
+}
+
 static void cmdHelp() {
+  char c[32];
+  helpLine("ls [dir]", "list .atr/.xfd/.atx files and folders");
+  snprintf(c, sizeof(c), "mount <1-%u> <path>|floppy", unitCount);
+  helpLine(c, "attach an image (ATR, XFD, ATX) or the floppy");
+  snprintf(c, sizeof(c), "umount <1-%u>", unitCount);
+  helpLine(c, "detach a unit (it stays virtual)");
+  snprintf(c, sizeof(c), "units [1-%u]", MAX_UNITS);
+  char t[48];
+  snprintf(t, sizeof(t), "show or set the number of drives (default %u)",
+           DEFAULT_UNITS);
+  helpLine(c, t);
+  snprintf(c, sizeof(c), "mode <1-%u> [mode]", unitCount);
+  helpLine(c, "show or set how a unit is served:");
   Serial.println(
-      "ls [dir]                  list .atr/.xfd/.atx files and folders\n"
-      "mount <1-4> <path>|floppy attach an image (ATR, XFD, ATX) or the "
-      "floppy\n"
-      "umount <1-4>              detach a unit\n"
-      "status                    units, drive model, SIO statistics\n"
+      "                          virtual   image from the SD card (silent "
+      "while empty)\n"
+      "                          physical  the floppy drive on this board "
+      "(one unit)\n"
+      "                          bypass    not answered; use another drive on "
+      "the SIO chain");
+  helpLine("status", "units, drive model, SIO statistics");
+  Serial.println(
       "new <path> <fmt>          create a blank ATR; fmt as below, or\n"
       "                          <count>x<128|256|512>, e.g. 65535x512\n"
       "dump <path>               copy the floppy to a new .atr, or\n"
@@ -609,7 +785,7 @@ static void cmdHelp() {
       "dd80\n"
       "drive 810|1050            drive timing model for ATX images\n"
       "speed <divisor>|off       Ultra Speed POKEY divisor (default 10)\n"
-      "save                      store the mounts in "
+      "save                      store the units and mounts in "
       "/ATARISIO.CFG");
 }
 
@@ -635,7 +811,7 @@ static void cmdLs(const char *dir) {
   }
 }
 
-// `mount <1-4> <path>|floppy`: the path is the rest of the line, so it may
+// `mount <unit> <path>|floppy`: the path is the rest of the line, so it may
 // contain spaces.
 static void cmdMount(char *args) {
   char *unitWord = skipBlanks(args);
@@ -648,7 +824,7 @@ static void cmdMount(char *args) {
   trimEnd(path);
   int u = parseUnit(unitWord);
   if (u < 0 || !*path)
-    Serial.println("usage: mount <1-4> <path>|floppy");
+    out("usage: mount <1-%u> <path>|floppy\n", unitCount);
   else
     mountUnit(u, path);
 }
@@ -656,36 +832,81 @@ static void cmdMount(char *args) {
 static void cmdUmount(char **w, int n) {
   int u = n == 2 ? parseUnit(w[1]) : -1;
   if (u < 0)
-    Serial.println("usage: umount <1-4>");
-  else if (unmountUnit(u))
-    out("D%d: detached\n", u + 1);
+    out("usage: umount <1-%u>\n", unitCount);
   else
-    out("D%d: was empty\n", u + 1);
+    umountUnit(u);
+}
+
+static void cmdUnits(char **w, int n) {
+  uint8_t count;
+  if (n == 1) {
+    out("%u drives (D1-D%u)\n", unitCount, unitCount);
+  } else if (n != 2 || !parseCount(w[1], &count)) {
+    out("usage: units [1-%u]\n", MAX_UNITS);
+  } else {
+    setUnitCount(count);
+    out("%u drives (D1-D%u)\n", unitCount, unitCount);
+  }
+}
+
+static void cmdMode(char **w, int n) {
+  int u = n >= 2 ? parseUnit(w[1]) : -1;
+  if (u < 0 || n > 3) {
+    out("usage: mode <1-%u> [virtual|physical|bypass]\n", unitCount);
+    return;
+  }
+  if (!unitInUse(u))
+    return;
+  if (n == 2) {
+    static const char *const names[] = {"virtual", "physical", "bypass"};
+    out("D%d: %s\n", u + 1, names[mounts[u].mode]);
+  } else if (!strcasecmp(w[2], "virtual")) {
+    setMode(u, MODE_VIRTUAL);
+  } else if (!strcasecmp(w[2], "physical") || !strcasecmp(w[2], "floppy")) {
+    setMode(u, MODE_PHYSICAL);
+  } else if (!strcasecmp(w[2], "bypass")) {
+    setMode(u, MODE_BYPASS);
+  } else {
+    out("usage: mode <1-%u> [virtual|physical|bypass]\n", unitCount);
+  }
 }
 
 static void cmdStatus() {
-  for (uint8_t i = 0; i < UNITS; i++) {
+  for (uint8_t i = 0; i < unitCount; i++) {
     Mount &m = mounts[i];
     out("D%u: ", i + 1);
-    if (m.source == SRC_NONE) {
-      Serial.println("empty");
+    if (m.mode == MODE_BYPASS) {
+      Serial.println("bypass (left to other drives on the chain)");
       continue;
     }
-    out("%s ", m.source == SRC_FLOPPY ? "floppy" : m.path);
+    if (m.source == SRC_NONE) {
+      Serial.println("virtual, empty");
+      continue;
+    }
+    if (m.source == SRC_FLOPPY)
+      out("physical floppy");
+    else
+      out("virtual %s", m.path);
     Adafruit_AtariDisk *disk = &m.atr;
     if (m.source == SRC_FLOPPY)
       disk = &atariFloppy;
     else if (m.source == SRC_ATX)
       disk = &m.atx;
     if (!disk->ready()) {
-      Serial.println("(no disk)");
+      Serial.println(" (no disk)");
       continue;
     }
+    out(", ");
     if (m.source == SRC_ATX)
       out("ATX ");
     printGeometry(disk->geometry());
     out(", %s\n", disk->writeProtected() ? "write protected" : "writable");
   }
+  if (unitCount == MAX_UNITS - 1)
+    out("D%u: not emulated (units %u)\n", MAX_UNITS, unitCount);
+  else if (unitCount < MAX_UNITS)
+    out("D%u-D%u: not emulated (units %u)\n", unitCount + 1, MAX_UNITS,
+        unitCount);
   out("ATX drive model: %s\n", driveModel == ATARI_DRIVE_810 ? "810" : "1050");
   const Adafruit_AtariSIO::Stats &s = sio.stats();
   out("SIO: %lu frames, %lu bad checksums, %lu bad frames, %lu NAK, %lu "
@@ -1034,7 +1255,7 @@ static void cmdDrive(char **w, int n) {
     return;
   }
   driveModel = strcmp(w[1], "810") ? ATARI_DRIVE_1050 : ATARI_DRIVE_810;
-  for (uint8_t i = 0; i < UNITS; i++)
+  for (uint8_t i = 0; i < MAX_UNITS; i++)
     mounts[i].atx.setDriveModel(driveModel);
   copyImage.atx.setDriveModel(driveModel);
   Serial.println("OK");
@@ -1056,6 +1277,10 @@ static void runCommand(char *s) {
     cmdLs(n > 1 ? w[1] : "/");
   else if (!strcasecmp(w[0], "umount"))
     cmdUmount(w, n);
+  else if (!strcasecmp(w[0], "units"))
+    cmdUnits(w, n);
+  else if (!strcasecmp(w[0], "mode"))
+    cmdMode(w, n);
   else if (!strcasecmp(w[0], "status"))
     cmdStatus();
   else if (!strcasecmp(w[0], "new"))
@@ -1110,6 +1335,7 @@ static void pollConsole() {
 // ---------------------------------------------------------------------------
 #if defined(OLED_SDA_PIN)
 static_assert(UI_PATH_LEN == PATH_LEN, "ui.h and the sketch disagree");
+static_assert(UI_MAX_UNITS == MAX_UNITS, "ui.h and the sketch disagree");
 
 const uint32_t UI_STATUS_MS = 100;
 const uint32_t UI_LIST_BUDGET_US = 2000; // time spent listing per loop pass
@@ -1132,8 +1358,10 @@ static void uiFillStatus(UiStatus &s) {
   memset(&s, 0, sizeof(s));
   s.busy = uiBusyOn;
   snprintf(s.busyText, sizeof(s.busyText), "%s", uiBusyText);
-  for (uint8_t i = 0; i < UNITS; i++) {
+  s.unitCount = unitCount;
+  for (uint8_t i = 0; i < MAX_UNITS; i++) {
     s.unit[i].source = (uint8_t)mounts[i].source; // same order as UiSource
+    s.unit[i].mode = (uint8_t)mounts[i].mode;     // same order as UiMode
     snprintf(s.unit[i].name, sizeof(s.unit[i].name), "%s",
              baseName(mounts[i].path));
   }
@@ -1229,21 +1457,28 @@ static void uiRun(const UiRequest &r) {
       snprintf(msg, sizeof(msg), "D%u mounted\n%.40s", r.unit + 1,
                baseName(r.path));
     break;
-  case UI_REQ_MOUNT_FLOPPY:
-    ok = mountUnit(r.unit, "floppy");
-    if (ok)
+  case UI_REQ_UMOUNT:
+    ok = umountUnit(r.unit);
+    snprintf(msg, sizeof(msg), "%s", uiCapture);
+    break;
+  case UI_REQ_SET_MODE:
+    ok = r.arg <= MODE_BYPASS && setMode(r.unit, (Mode)r.arg);
+    if (ok && r.arg == MODE_PHYSICAL)
       snprintf(msg, sizeof(msg), "D%u: floppy%s", r.unit + 1,
                atariFloppy.ready() ? "" : "\nno disk yet");
+    else
+      snprintf(msg, sizeof(msg), "%s", uiCapture);
     break;
-  case UI_REQ_UMOUNT:
-    snprintf(msg, sizeof(msg),
-             unmountUnit(r.unit) ? "D%u detached" : "D%u was empty",
-             r.unit + 1);
+  case UI_REQ_SET_UNITS:
+    ok = r.arg >= 1 && r.arg <= MAX_UNITS;
+    if (ok)
+      setUnitCount(r.arg);
+    snprintf(msg, sizeof(msg), "%u drives", unitCount);
     break;
   case UI_REQ_SAVE:
     cmdSave();
     ok = !strncmp(uiCapture, "Saved", 5);
-    snprintf(msg, sizeof(msg), "%s", ok ? "Mounts saved" : uiCapture);
+    snprintf(msg, sizeof(msg), "%s", ok ? "Settings saved" : uiCapture);
     break;
   default:
     ok = false;

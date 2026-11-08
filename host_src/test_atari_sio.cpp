@@ -869,6 +869,45 @@ static void test_rx_buffer_handling() {
   CHECK(g.n() > 0 && g.b(0) == 'A');
 }
 
+static void test_units() {
+  // D15: is device $3F and answers like any other unit.
+  Fix f;
+  RamDisk d15(atari_geometry_for_density(ATARI_DENSITY_SD));
+  CHECK(f.sio.attach(15, &d15));
+  f.command('S', 0, 19040, 0x3F);
+  f.run();
+  expectReadReply(f, 4, "status D15");
+  CHECK(f.sio.stats().lastUnit == 15);
+  f.port.tx.clear();
+  f.command('R', 1, 19040, 0x3F);
+  f.run();
+  expectReadReply(f, 128, "read D15");
+  CHECK(f.sio.stats().lastUnit == 15);
+
+  // An unattached unit never answers, and the next frame is still served.
+  Fix g;
+  g.command('S', 0, 19040, 0x39);
+  g.run();
+  CHECK(g.n() == 0);
+  g.command('S', 0, 19040, 0x31);
+  g.run();
+  expectReadReply(g, 4, "status after silent frame");
+  CHECK(g.sio.stats().lastUnit == 1);
+
+  // Device $40 is not a disk, even with every unit attached.
+  Fix h;
+  RamDisk extra(atari_geometry_for_density(ATARI_DENSITY_SD));
+  for (uint8_t u = 2; u <= 15; u++)
+    CHECK(h.sio.attach(u, &extra));
+  h.command('S', 0, 19040, 0x40);
+  h.run();
+  CHECK(h.n() == 0);
+
+  // Only 1..15 can be attached.
+  CHECK(!h.sio.attach(0, &extra));
+  CHECK(!h.sio.attach(16, &extra));
+}
+
 int main() {
   test_checksum_and_framing();
   test_rx_buffer_handling();
@@ -883,6 +922,7 @@ int main() {
   test_protected_reads();
   test_highspeed();
   test_xf551();
+  test_units();
   printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

@@ -71,15 +71,21 @@ public:
 };
 
 /*!
- * @brief Atari SIO disk drives D1:-D8: on top of an Adafruit_AtariSIOPort.
+ * @brief Atari SIO disk drives D1:-D15: on top of an Adafruit_AtariSIOPort.
  *
  * Call attach() for each emulated unit, begin(), then poll() from loop().
+ * Unit n answers to SIO device ID $30 + n ($31-$3F). A unit with nothing
+ * attached never answers, so a real drive with that number elsewhere on the
+ * SIO chain can be used (bypass).
  * Supports R, W, P, S, !, ", N, O (128, 256 and 512-byte sectors), the Ultra
  * Speed '?' probe with autobaud switching, and the XF551 high-speed command
  * variants.
  */
 class Adafruit_AtariSIO {
 public:
+  /** Highest unit number: D15: is SIO device ID $3F. */
+  static const uint8_t MAX_UNITS = 15;
+
   /** Read-only diagnostic counters. */
   struct Stats {
     uint32_t frames;       ///< Valid command frames addressed to our units
@@ -88,7 +94,7 @@ public:
     uint32_t naks;         ///< NAK bytes sent
     uint32_t errors;       ///< ERROR ('E') results sent
     uint8_t lastCommand;   ///< Command byte of the last valid frame
-    uint8_t lastUnit;      ///< Unit (1-8) of the last valid frame
+    uint8_t lastUnit;      ///< Unit (1-15) of the last valid frame
     uint16_t lastAux;      ///< AUX1 | AUX2 << 8 of the last valid frame
     uint8_t lastResult;    ///< Last response byte (A, N, C or E)
     bool highSpeed;        ///< true while listening at the Ultra Speed rate
@@ -105,7 +111,7 @@ public:
 
   /*!
    * @brief Attach a disk to a unit.
-   * @param unit Unit number 1-8 (D1: to D8:).
+   * @param unit Unit number 1-15 (D1: to D15:).
    * @param disk The disk; must outlive this object.
    * @return false if unit is out of range or disk is NULL.
    */
@@ -113,7 +119,7 @@ public:
 
   /*!
    * @brief Remove a unit; it then ignores all commands.
-   * @param unit Unit number 1-8.
+   * @param unit Unit number 1-15.
    */
   void detach(uint8_t unit);
 
@@ -194,7 +200,7 @@ private:
   void setBaud(uint32_t baud);
 
   Adafruit_AtariSIOPort *port_; ///< Transport
-  Unit units_[8];               ///< Units D1:-D8:
+  Unit units_[MAX_UNITS];       ///< Units D1:-D15:
   uint8_t ultraDivisor_;        ///< 0 = Ultra Speed disabled
   bool xf551_;                  ///< Accept XF551 variants
   bool highBaud_;               ///< Listening at the Ultra Speed rate

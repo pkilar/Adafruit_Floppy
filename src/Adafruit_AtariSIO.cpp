@@ -111,7 +111,7 @@ void Adafruit_AtariSIO::begin() {
 }
 
 bool Adafruit_AtariSIO::attach(uint8_t unit, Adafruit_AtariDisk *disk) {
-  if (unit < 1 || unit > 8 || !disk)
+  if (unit < 1 || unit > MAX_UNITS || !disk)
     return false;
   Unit &u = units_[unit - 1];
   memset(&u, 0, sizeof(u));
@@ -121,7 +121,7 @@ bool Adafruit_AtariSIO::attach(uint8_t unit, Adafruit_AtariDisk *disk) {
 }
 
 void Adafruit_AtariSIO::detach(uint8_t unit) {
-  if (unit >= 1 && unit <= 8)
+  if (unit >= 1 && unit <= MAX_UNITS)
     memset(&units_[unit - 1], 0, sizeof(Unit));
 }
 
@@ -354,7 +354,7 @@ void Adafruit_AtariSIO::poll() {
 
 void Adafruit_AtariSIO::handleCommand(const uint8_t *f) {
   uint8_t unit = (uint8_t)(f[0] - 0x30);
-  if (f[0] < 0x31 || unit > 8 || !units_[unit - 1].disk)
+  if (f[0] < 0x31 || unit > MAX_UNITS || !units_[unit - 1].disk)
     return; // not ours: stay silent
   Unit &u = units_[unit - 1];
   uint16_t aux = (uint16_t)(f[2] | (f[3] << 8));

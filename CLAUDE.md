@@ -82,7 +82,7 @@ Floppsy RP2350 sketches (240MHz, TinyUSB). `floppsy_write_verify` is driven from
 
 ### Atari 8-bit support (SIO drive emulation + physical Atari disks)
 
-`examples/atari_sio_drive` makes the board act as Atari drives D1–D4 on the SIO bus, backed by ATR/XFD/ATX images on SD or by a real Atari floppy in a PC drive. Its README covers wiring and the console commands. The layers:
+`examples/atari_sio_drive` makes the board act as Atari drives D1–D15 on the SIO bus (4 by default). Each is virtual (an ATR/XFD/ATX image on SD), physical (a real Atari floppy in the board's PC drive) or bypass (left to another drive on the chain). Its README covers wiring and the console commands. The layers:
 
 - **`atari_disk.h`** (plain C): geometry (128/256/512-byte sectors, 1 or 2 sides, 40 or 80 tracks, or one-track "hard disk" images up to 65535 sectors), the size → geometry table (`atari_geometry_for_sectors`), logical sector ↔ cylinder/head/slot and the WD status bits.
   - On 256-byte-sector disks, sectors 1–3 are 256 bytes on disk but 128 bytes over SIO and in ATRs (`atari_sector_bytes`). With 512-byte sectors (SpartaDOS X) every sector is full size.
