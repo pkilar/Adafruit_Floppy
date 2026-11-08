@@ -57,9 +57,10 @@ and `ui_config.h`):
 | Floppy DENSITY, INDEX, SELECT, MOTOR, DIR, STEP | 8, 2, 9, 10, 11, 12 |
 | Floppy WRDATA, WRGATE, TRK0, PROT, READ, SIDE, READY | 13, 14, 4, 5, 3, 15, 6 |
 | SIO UART0 TX / RX, COMMAND | 16 / 17, 26 |
+| SIO PROCEED / INTERRUPT outputs (wired, not driven by the sketch yet) | 22 / 23 |
 | microSD SDIO CLK, CMD, DAT0 (DAT1-3 = 37-39), card detect | 34, 35, 36, 40 |
 | OLED SDA / SCL (I2C0, address 0x3C) | 28 / 29 |
-| Encoder A, B, switch (active low, external pull-ups) | 22, 23, 24 |
+| Encoder A, B, switch (active low, external pull-ups) | 42, 44, 45 |
 | VBUS sense (ADC, 100k/27k), PD power good, status LED | 41, 43, 21 |
 | PSRAM chip select (QMI CS1) | 47 |
 

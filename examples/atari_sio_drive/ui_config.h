@@ -42,10 +42,11 @@
 #define OLED_SPI_RES_PIN 27
 #define OLED_SPI_HZ 8000000
 // EC11 rotary encoder; A, B and the switch are active low with external
-// pull-ups
-#define ENCODER_A_PIN 22
-#define ENCODER_B_PIN 23
-#define ENCODER_SW_PIN 24
+// pull-ups. On U1's right side, next to the encoder (board revision with the
+// microSD slot on the bottom edge).
+#define ENCODER_A_PIN 42
+#define ENCODER_B_PIN 44
+#define ENCODER_SW_PIN 45
 // VBUS_PD through 100k/27k, 12 V present when above about 1.9 V
 #define VBUS_SENSE_PIN 41
 #define STATUS_LED_PIN 21
