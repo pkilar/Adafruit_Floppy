@@ -9,3 +9,4 @@ check[0-9]
 checkfm*
 decode[0-9]
 decodefm*
+test_fm_decode
