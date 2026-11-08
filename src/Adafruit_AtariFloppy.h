@@ -201,6 +201,36 @@ public:
    */
   uint32_t revolutionMicros();
 
+  /*!
+   * @brief Where the head last was, for a status display. Plain field reads:
+   * cheap and safe to call from another core than the one using the drive
+   * (a value may be one access old).
+   * @return The media cylinder of the last successful seek (during density
+   * detection the physical track), or 0xFF if the head has not moved yet.
+   */
+  uint8_t currentCylinder() const;
+
+  /*!
+   * @brief The side selected by the last successful side change.
+   * @return 0 or 1; 0 before the first access.
+   */
+  uint8_t currentHead() const;
+
+  /*!
+   * @brief Whether the spindle motor is on (it is stopped by idle() after
+   * about 3 s without access). Reads a cached flag; never touches the drive.
+   * @return true while the motor is spinning.
+   */
+  bool motorSpinning();
+
+  /*!
+   * @brief When the drive was last used.
+   * @return millis() at the last spin-up check of a read, write or detect;
+   * 0 if never. A display can call the drive busy while
+   * millis() - lastAccessMillis() is small.
+   */
+  uint32_t lastAccessMillis() const;
+
   /** Optional stream for diagnostics. */
   Stream *debug = nullptr;
 
@@ -211,6 +241,7 @@ private:
   bool detectIfNeeded();
   bool motorOn();
   bool seek(uint8_t cylinder);
+  bool setSide(uint8_t head);
   size_t capture();
   uint8_t detectMediaTracks(atari_density_t density);
   bool detectSecondSide(atari_density_t density);
@@ -240,7 +271,9 @@ private:
   atari_density_t _density = ATARI_DENSITY_SD;
   uint32_t _rev_ticks = 0; // last measured revolution, 0 = unknown
   uint32_t _last_access_ms = 0;
-  size_t _last_pulses = 0; // pulses in g_flux from the last capture()
+  volatile uint8_t _pos_cyl = 0xff; // cylinder of the last seek, 0xff = unknown
+  volatile uint8_t _pos_head = 0;   // side of the last side change
+  size_t _last_pulses = 0;          // pulses in g_flux from the last capture()
   uint8_t _cache_cyl = NO_TRACK;
   uint8_t _cache_head = 0;
   uint8_t _data[ATARI_FLOPPY_MAX_BYTES]; // SIO data of the cached track

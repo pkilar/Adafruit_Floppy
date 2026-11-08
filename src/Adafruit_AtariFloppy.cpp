@@ -81,7 +81,17 @@ bool Adafruit_AtariFloppy::motorOn() {
 }
 
 bool Adafruit_AtariFloppy::seek(uint8_t cylinder) {
-  return _drive->goto_track(_double_step ? 2 * cylinder : cylinder);
+  bool ok = _drive->goto_track(_double_step ? 2 * cylinder : cylinder);
+  if (ok)
+    _pos_cyl = cylinder;
+  return ok;
+}
+
+bool Adafruit_AtariFloppy::setSide(uint8_t head) {
+  bool ok = _drive->side(head);
+  if (ok)
+    _pos_head = head;
+  return ok;
 }
 
 // Capture 1.25 revolutions starting at an index pulse and, because the
@@ -117,6 +127,7 @@ uint8_t Adafruit_AtariFloppy::detectMediaTracks(atari_density_t density) {
   uint8_t result = 40;
   if (!_drive->goto_track(2))
     return result;
+  _pos_cyl = 2;
   for (uint8_t i = 0; i < DETECT_TRIES; i++) {
     size_t n = capture();
     if (!n)
@@ -141,10 +152,11 @@ uint8_t Adafruit_AtariFloppy::detectMediaTracks(atari_density_t density) {
 // with cylinder 0. The head is left on side 0.
 bool Adafruit_AtariFloppy::detectSecondSide(atari_density_t density) {
   bool found = false;
-  if (!_drive->goto_track(0) || !_drive->side(1)) {
-    _drive->side(0);
+  if (!_drive->goto_track(0) || !setSide(1)) {
+    setSide(0);
     return false;
   }
+  _pos_cyl = 0;
   for (uint8_t i = 0; i < DETECT_TRIES && !found; i++) {
     size_t n = capture();
     if (!n)
@@ -153,7 +165,7 @@ bool Adafruit_AtariFloppy::detectSecondSide(atari_density_t density) {
         atari_decode_track_head(density, 0, 1, g_flux, n, cellTicks(density),
                                 _data, _valid, true) > 0;
   }
-  _drive->side(0);
+  setSide(0);
   return found;
 }
 
@@ -164,7 +176,7 @@ bool Adafruit_AtariFloppy::insert() {
   _cache_cyl = NO_TRACK;
   _rev_ticks = 0;
   _double_step = false;
-  bool spinning = motorOn() && _drive->side(0) && seek(0);
+  bool spinning = motorOn() && setSide(0) && seek(0);
   for (uint8_t i = 0; spinning && i < DETECT_TRIES && !_ready; i++) {
     size_t n = capture();
     if (!n)
@@ -254,7 +266,7 @@ bool Adafruit_AtariFloppy::loadTrack(uint8_t cylinder, uint8_t head) {
   if (_cache_cyl == cylinder && _cache_head == head)
     return true;
   _cache_cyl = NO_TRACK;
-  if (!motorOn() || !seek(cylinder) || !_drive->side(head))
+  if (!motorOn() || !seek(cylinder) || !setSide(head))
     return false;
   atari_geometry_t g = atari_geometry_for_density(_density);
   memset(_valid, 0, g.sectors_per_track);
@@ -428,7 +440,7 @@ Adafruit_AtariFloppy::writeTrackImpl(uint8_t track, uint8_t head,
   _cache_head = head;
 
   atari_disk_result_t result = ATARI_DISK_OK;
-  if (!seek(track) || !_drive->side(head) || !writeCached()) {
+  if (!seek(track) || !setSide(head) || !writeCached()) {
     result = ATARI_DISK_IO_ERROR;
   } else if (verify) {
     // Read it back: every sector must decode to what was written
@@ -528,7 +540,7 @@ Adafruit_AtariFloppy::readProtectedTrack(uint8_t track, atari_prot_track_t *out,
   if (revolutions > 8)
     revolutions = 8;
   _cache_cyl = NO_TRACK;
-  if (!motorOn() || !seek(track) || !_drive->side(0))
+  if (!motorOn() || !seek(track) || !setSide(0))
     return ATARI_DISK_IO_ERROR;
   uint8_t got = 0;
   for (uint8_t i = 0; i < revolutions; i++) {
@@ -626,7 +638,7 @@ Adafruit_AtariFloppy::writeProtectedTrack(const atari_prot_track_t *t,
   _cache_cyl = NO_TRACK;
 
   atari_disk_result_t result = ATARI_DISK_OK;
-  if (!seek(t->track) || !_drive->side(0)) {
+  if (!seek(t->track) || !setSide(0)) {
     result = ATARI_DISK_IO_ERROR;
   } else if (t->sector_count == 0) {
     // An unformatted track
@@ -667,4 +679,16 @@ Adafruit_AtariFloppy::writeProtectedTrack(const atari_prot_track_t *t,
     _double_step = previous_step;
   }
   return result;
+}
+
+uint8_t Adafruit_AtariFloppy::currentCylinder() const { return _pos_cyl; }
+
+uint8_t Adafruit_AtariFloppy::currentHead() const { return _pos_head; }
+
+bool Adafruit_AtariFloppy::motorSpinning() {
+  return _drive->motor_is_spinning();
+}
+
+uint32_t Adafruit_AtariFloppy::lastAccessMillis() const {
+  return _last_access_ms;
 }
