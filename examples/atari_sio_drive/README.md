@@ -99,6 +99,38 @@ more than 160 entries.
 Errors such as "Cannot open ..." appear as a message for a few seconds or until
 a press. Menus return to the status screen after a minute without input.
 
+## Building with PlatformIO
+
+`platformio.ini` in this folder builds the same firmware without the Arduino
+IDE: run `pio run` here (the first build downloads the platforms and
+libraries). The library itself is this repository (`symlink://../..`), the
+other libraries are pinned registry versions, and the RP2 environments use
+Earle Philhower's core through `maxgerhardt/platform-raspberrypi` pinned to a
+commit. The TinyUSB stack is selected with `-DUSE_TINYUSB`. PlatformIO builds
+`pio/main.cpp`, which includes the sketch and `ui.cpp`, because its own
+`.ino` conversion mishandles the board `#if` chain. Arduino ignores that folder.
+
+| Environment | Board |
+|---|---|
+| `floppy_sio_rp2350b` (default) | custom RP2350B board, SH1106 on I2C (`OLED_TYPE=1`), 150 MHz, 16 MB flash, PSRAM CS GPIO47 |
+| `floppy_sio_rp2350b_sh1106_spi` / `_ssd1306_spi` / `_ssd1309_spi` | the same with an SPI display (`OLED_TYPE` 2, 3, 4) |
+| `feather_rp2040`, `floppsy_rp2040`, `feather_rp2350` | Adafruit boards, 120 MHz, no UI |
+| `feather_m4_express` | Feather M4 Express, 120 MHz (uses the core's built-in TinyUSB) |
+
+The Floppsy RP2350 has no PlatformIO board definition, so it is not included.
+The custom board uses the stock `generic_rp2350` board with
+`-D__PICO_RP2350A=0` (RP2350B) and `-DRP2350_PSRAM_CS=47`.
+
+```
+pio run -e floppy_sio_rp2350b                 # build
+pio run -e floppy_sio_rp2350b -t upload       # upload
+pio device monitor -e floppy_sio_rp2350b      # serial console, 115200 baud
+```
+
+RP2 boards upload with picotool: hold BOOTSEL while plugging in the USB cable
+(or let PlatformIO reset a running firmware with the 1200 bps touch), then run
+the upload. The M4 uses the SAM-BA bootloader (double-tap reset).
+
 ## SIO wiring
 
 Atari SIO pins used: 3 DATA IN, 4 GND, 5 DATA OUT, 7 COMMAND. The names are the
