@@ -1,0 +1,185 @@
+# Atari SIO drive
+
+Turns a supported board into Atari 8-bit disk drives D1: to D4: on the SIO bus.
+Each unit serves either an ATR/XFD/ATX image from a microSD card or a real Atari
+floppy in a PC (Shugart) drive. Everything is configured over the USB serial
+console at 115200 baud.
+
+**Status: not tested on a real Atari.** It was validated only by host-side
+simulation of the SIO protocol and by compile checks on the CI platforms.
+Expect to debug wiring and timing.
+
+## Supported boards
+
+| Board | Floppy pins | SIO UART | COMMAND | microSD |
+|---|---|---|---|---|
+| Feather M4 Express | as `greaseweazle` | Serial1 (TX/RX pins) | SDA | SPI breakout, CS = SCL |
+| Feather RP2040 / RP2350 HSTX | as `greaseweazle` | Serial1 (TX/RX pins) | D4 (GPIO6) | SPI breakout, CS = SCL |
+| Floppsy RP2040 | built in | UART0 on GPIO16 (TX) / GPIO17 (RX), the STEMMA QT pins | GPIO26 (SENSE1 JST) | on-board, CS = `PIN_CARD_CS` |
+| Floppsy RP2350 | built in | **unverified**, copied from the RP2040 | **unverified** | SDIO |
+
+The Floppsy RP2350 board package was not released when this was written; its
+SIO pins are guesses and `setup()` reports an error if the UART rejects them.
+All pins are in one block at the top of the sketch. Select the Adafruit TinyUSB
+stack under Tools > USB Stack.
+
+## SIO wiring
+
+Atari SIO pins used: 3 DATA IN, 4 GND, 5 DATA OUT, 7 COMMAND. The names are the
+Atari's point of view, so the board **receives** on DATA OUT and **transmits**
+on DATA IN.
+
+| Atari SIO | Board |
+|---|---|
+| 5 DATA OUT | UART RX, through a 5 V to 3.3 V level shifter |
+| 7 COMMAND | COMMAND pin, through a 5 V to 3.3 V level shifter |
+| 3 DATA IN | UART TX, through a 1N4148 diode (below) |
+| 4 GND | GND |
+
+The Atari signals are 5 V and these MCUs are not 5 V tolerant. From AtariSIO's
+`README.RPi` (the Raspberry Pi wiring):
+
+* DATA OUT and COMMAND need level shifting down to 3.3 V. A resistor divider or
+  a down-shifting FET shifter works; shifting up is not needed.
+* DATA IN is a shared bus line. Put a 1N4148 in series with the board's TX, anode
+  to the SIO pin and cathode to the board, so the board can only pull the line
+  low and the Atari's pull-up makes the high level. Without it a 3.3 V push-pull
+  output fights the other SIO devices. An open-drain buffer that is high-Z when
+  not transmitting does the same job. This is only optional if the board is the
+  one and only device on the bus.
+
+Not taken from that documentation (general practice, check it yourself): the
+divider values (for example 2.2k/3.3k for DATA OUT and COMMAND), and checking
+the DATA IN waveform at the Ultra Speed rate, since the diode slows the rising
+edge. The Atari's +5 V on SIO pin 10 is not used.
+
+## Floppy drive
+
+* Best: a 5.25" 40-track 360K drive (300 RPM), which is what Atari disks were
+  written for. It needs 12 V as well as 5 V.
+* A 5.25" 1.2MB drive turns at 360 RPM and has 80 tracks: set `DRIVE_RPM` to 360
+  and `DRIVE_TRACKS` to 80 at the top of the sketch. The library drives it at
+  its low density setting and tells 40-track from 80-track media by the
+  cylinder numbers in the sector IDs of physical track 2, stepping twice per
+  track for 40-track disks.
+* 3.5" drives cannot read 5.25" Atari disks. 80-track double-sided disks
+  written by 3.5"-modified drives may work with `DRIVE_TRACKS` 80; this is
+  untested, and the side-1 order is assumed to follow the XF551.
+* Double-sided XF551 disks need a drive with a side-select line, which every PC
+  drive has. Side 1 of an XF551 disk is read as logical sectors 721 to 1440,
+  walking the tracks backwards (sector 721 is track 39, 1440 is track 0).
+
+The measured spindle speed is printed when the floppy is mounted.
+
+## Formats
+
+| Format | Sectors | Image (ATR/XFD) | Physical floppy |
+|---|---|---|---|
+| SD, FM, 18 x 128, 40 tracks | 720 (90K) | yes | yes |
+| ED, MFM, 26 x 128, 40 tracks | 1040 (130K) | yes | yes |
+| DD, MFM, 18 x 256, 40 tracks | 720 (180K) | yes | yes |
+| DS DD (XF551), 2 x 40 tracks | 1440 (360K) | yes | yes |
+| DS DD, 80 tracks | 2880 (720K) | yes | 80-track drive only |
+| 512-byte sectors, 720 / 1440 / 2880 sectors | SpartaDOS X | yes | no |
+| 128, 256 or 512 bytes, up to 65535 sectors | SpartaDOS X "hard disk" | yes | no |
+| ATX (protected, 40 tracks, one side) | any | read-only | dump and master |
+
+Format tokens, used by `new` and `format`: `[ds](sd|ed|dd)[80]`, for example
+`sd`, `dd`, `dsdd` (XF551 360K), `dsdd80` (720K) and `dd80`. `new` also takes
+`<count>x<128|256|512>`, for example `65535x512` for a 32 MB SpartaDOS X image.
+The resulting geometry is printed.
+
+## Console commands
+
+| Command | What it does |
+|---|---|
+| `help` | List the commands |
+| `ls [dir]` | List folders and `.atr` / `.xfd` / `.atx` files with sizes |
+| `mount <1-4> <path>\|floppy` | Attach an image (read-write if possible, otherwise read-only; `.atx` files and files starting with `AT8X` are ATX and always read-only) or the physical floppy, which spins up and prints the detected density and measured RPM |
+| `umount <1-4>` | Detach a unit |
+| `status` | Per unit: source, "ATX" for protected images, geometry (sector size, tracks, sides), write protection; ATX drive model; SIO statistics; Ultra Speed setting |
+| `new <path> <fmt>` | Create a blank ATR (`<fmt>` as in Formats); refuses to overwrite |
+| `dump <path>` | `.atr`: copy the floppy to a new ATR with the detected geometry (both sides, 40 or 80 tracks). Prints progress per track side and the unreadable sectors, which are stored as zeros. `.atx`: a protected dump of a single-sided 40-track floppy; per track it prints the entry count and the duplicate, CRC, missing, deleted and weak counts. Refused for double-sided or 80-track media |
+| `write <path> yes` | `.atr`: copy an image onto the floppy, one verified track side at a time; the drive must be able to format that geometry. `.atx`: master the protected image (see Copy protection); prints entries, the largest push in angular units and failures per track. Needs the literal `yes` |
+| `format <fmt> yes` | Format the floppy; refused for geometries the drive cannot do (80 tracks need an 80-track drive). Needs the literal `yes` |
+| `drive 810\|1050` | Drive model whose timing ATX mounts use (default 1050) |
+| `speed <divisor>\|off` | Ultra Speed POKEY divisor (default 10, about 38400 baud) |
+| `save` | Write the current mounts to `/ATARISIO.CFG` |
+
+Paths cannot contain spaces. `dump`, `write` and `format` block for seconds to
+minutes; the floppy is taken off the SIO bus meanwhile and the Atari cannot use
+the drives until they finish (a floppy mounted on a unit is reattached
+afterwards).
+
+## Config file
+
+`/ATARISIO.CFG` on the SD card is read at startup. One mount per line, `#`
+starts a comment line:
+
+```
+# boot from the floppy, games on D2
+D1 FLOPPY
+D2 /games/mule.atr
+```
+
+## Copy protection
+
+ATX images keep what a sector copy loses: several sectors with the same number,
+data CRC errors, sectors whose ID has no data field, deleted data marks, weak
+(read differently every time) sectors and their rotational positions. A mounted
+ATX is served with a timing model of an Atari 1050 (WD2793) or 810 (FD1771),
+chosen with `drive`:
+
+* The sector read is the next ID of that number the head reaches from its
+  current angular position, so duplicate sectors come back in the order and
+  with the delays a real drive gives, and a missing sector takes the drive's
+  full retry time to fail.
+* CRC error, missing and deleted status is reported as the controller does
+  (the SIO engine sends the data frame with the error status when there is
+  data).
+* Weak sectors return different bytes from the weak offset on at each read.
+* ATX mounts are read-only. Writes are refused.
+
+`dump <path>.atx` reads a real protected floppy: each track is captured about
+five times, every sector ID is scanned (so duplicates, CRC errors, missing and
+deleted sectors are found) and the revolutions are compared to find weak
+sectors. Tracks with nothing readable are stored as empty.
+
+`write <path>.atx yes` masters an ATX onto a disk, track by track. This is
+experimental: each track is encoded with every entry at its recorded angular
+position (pushed later if sectors would overlap, which is reported; if a
+sector would straddle the index the whole track is rotated so the index falls
+in a gap, which Atari drives cannot notice), an
+unformatted track is erased, and the track is read back and compared. Weak
+sectors are written as flux out of specification so that they read differently
+each time; this has not been tried on a real drive. Whether a mastered disk
+passes its protection check depends on the drive's timing and is unproven.
+
+A real protected floppy mounted live (`mount 1 floppy`) also serves simple
+bad-sector protections: when a sector cannot be read cleanly but its ID is on
+the disk with a data field that has a bad CRC, the SIO engine sends that data
+with the CRC error status instead of reporting the sector as missing. Timing
+tricks, duplicate sectors and weak bits need an ATX dump.
+
+## Limitations
+
+* Not tested on a real Atari or with real protected disks. The 1050/810 timing
+  constants are approximate.
+* Physical disks: SD, ED and DD (128/256-byte sectors, 40 tracks, or 80 tracks
+  on an 80-track drive), one or two sides. 512-byte and large SpartaDOS X
+  images work as image files only.
+* ATX is single-sided, 40 tracks. Sectors with a CRC error in the ID field
+  cannot be represented. Long sectors keep only the first 128/256 bytes.
+* Weak-bit mastering is untested on hardware.
+* The side byte of the sector IDs on side 1 of an XF551 disk is not known for
+  certain, so reads accept 0 or 1.
+* Writing to the physical floppy rewrites whole tracks and is refused for tracks
+  with unreadable sectors: `format` the disk first.
+* Ultra Speed and XF551 high-speed commands are supported. XF551 mode changes
+  the UART speed between the ACK and the Atari's data frame; that switch has
+  not been timed on real hardware yet.
+* PC drives have no usable disk-change signal. A swap is noticed once the drive
+  has been idle for 3 seconds (motor off); until the next read, `status` still
+  reports the previous disk's density. Don't swap disks while the drive is busy.
+* A live floppy does not report the "deleted" status of a sector (it is read as
+  normal data); only an ATX dump does.
