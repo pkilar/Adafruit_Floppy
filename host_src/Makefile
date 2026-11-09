@@ -55,6 +55,11 @@ check-sio:
 	$(CXX) -std=c++11 -Wall -Wextra -Werror -I../src test_atari_sio.cpp ../src/Adafruit_AtariSIO.cpp -o /tmp/test_atari_sio
 	/tmp/test_atari_sio
 
+.PHONY: check-pd
+check-pd:
+	$(CXX) -std=c++11 -Wall -Wextra -Werror -I../src test_fusb302_sink.cpp ../src/Adafruit_FUSB302Sink.cpp -o /tmp/test_fusb302_sink
+	/tmp/test_fusb302_sink
+
 .PHONY: all
 all: check checkfm
 

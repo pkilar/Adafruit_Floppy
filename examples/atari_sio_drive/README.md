@@ -62,7 +62,7 @@ and `ui_config.h`):
 | OLED SDA / SCL (I2C0, address 0x3C) | 44 / 45 |
 | SPI OLED SCK / MOSI (SPI1), CS, DC, RES | 42 / 43, 31, 30, 29 |
 | Encoder A, B, switch (active low, external pull-ups) | 40, 39, 41 |
-| VBUS sense (ADC, 100k/27k), PD power good, status LED | 46, 47, 21 |
+| USB-PD controller FUSB302 SDA / SCL (I2C1, address 0x22), status LED | 46 / 47, 21 |
 | PSRAM chip select (QMI CS1) | 0 |
 
 **Selecting the board.** In the Arduino IDE choose Tools > Board > Raspberry Pi
@@ -77,14 +77,27 @@ The status LED (GPIO21) blinks on SIO traffic; the SD card is started before
 anything claims a PIO, because SdFat's PIO SDIO needs to move the PIO's GPIO
 base to 16 and the floppy code only uses PIOs with base 0.
 
-**Display options.** The board has an I2C OLED header (SDA 28, SCL 29, 0x3C) and a
-7-pin SPI OLED socket (SPI1: SCK 30, MOSI 31, CS 32 in software, DC 33,
-RES 27). Choose one with `OLED_TYPE` in `ui_config.h` (or build with
+**Display options.** The board has an I2C OLED header (SDA 44, SCL 45, 0x3C) and a
+7-pin SPI OLED socket (SPI1: SCK 42, MOSI 43, CS 31 in software, DC 30,
+RES 29). Choose one with `OLED_TYPE` in `ui_config.h` (or build with
 `-DOLED_TYPE=n`): `OLED_SH1106_I2C` (1, default), `OLED_SH1106_SPI` (2),
 `OLED_SSD1306_SPI` (3), `OLED_SSD1309_SPI` (4, 2.42" modules). SPI runs at
 8 MHz on hardware SPI1. SSD1309 is driven by Adafruit_SSD1306, whose command
 set it shares; this was not tried on a real module. Needs the Adafruit SH110X
 and Adafruit SSD1306 libraries.
+
+**USB Power Delivery.** The PD port has a FUSB302 controller on I2C1 instead
+of a fixed-voltage PD trigger chip, so the firmware asks the charger for
+12 V (`PD_REQUEST_MV` / `PD_REQUEST_MA` in `ui_config.h`, default 12 V 3 A).
+The board starts on the 5 V every charger gives; when the charger accepts
+12 V, the board's switch turns on the drive's 12 V pin by itself. A charger
+without 12 V stays at 5 V, which is enough for 3.5" drives. The sink runs
+on core 1 from a 3 ms timer interrupt, because a charger cuts VBUS (a hard
+reset) if a Request is more than about 25 ms late, and core 0 keeps
+interrupts off during flux captures. It speaks PD 2.0 (PD 3.0 chargers fall
+back to it) and never sends a hard reset itself: after a reset of the
+RP2350 it renegotiates with a Soft_Reset, which keeps VBUS on. The `pd`
+console command shows the state and the charger's offers.
 
 **User interface.** Other boards have no UI and behave as before. It runs on
 core 1, so the SIO engine on core 0 is not delayed by the display. Core 1 never
@@ -107,7 +120,9 @@ Screens:
    scroll when more are emulated (`^` and `v` at the right edge show there are
    more). Below: the last SIO command (`>` while active) and, when the floppy
    is mounted, its type (SD/ED/DD, SS/DS, tracks), current track and side, and
-   MOTOR / BUSY. The last line shows the PD voltage (VBUS sense).
+   MOTOR / BUSY. The last line shows the power source: `PD 12V`, `PD 5V`,
+   `5V no PD` (a charger without USB-PD), `PD ...` (negotiating) or
+   `USB power` (nothing on the PD port; running from the data port).
 2. **Menu**: Browse SD card, one item per unit (`D1 SDX.ATR`, `D2 FLOPPY`,
    `D3 bypass`, `D4 --`), `Drives: N`, Save settings (writes `/ATARISIO.CFG`
    like `save`), Back.
@@ -246,6 +261,7 @@ The resulting geometry is printed.
 | `drive 810\|1050` | Drive model whose timing ATX mounts use (default 1050) |
 | `speed <divisor>\|off` | Ultra Speed POKEY divisor (default 10, about 38400 baud) |
 | `save` | Write the drive count, modes and mounts to `/ATARISIO.CFG` |
+| `pd` | RP2350B board: USB-PD state, contract and the charger's offers |
 
 `mount` and the config file take the rest of the line as the path, so those
 paths may contain spaces (no quoting; leading and trailing blanks are dropped).

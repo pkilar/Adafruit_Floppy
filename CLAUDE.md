@@ -21,6 +21,7 @@ make check-atr       # ATR/XFD image backend over a memory file
 make check-sio       # SIO drive protocol engine against a simulated Atari (virtual clock, baud-aware wire)
 make check-atx       # ATX (copy-protected) images: parser, writer, 1050/810 timing model, weak bits
 make check-atari-prot  # protected-track codec: scan every ID with its angular position, merge revolutions, master tracks
+make check-pd        # FUSB302 USB-PD sink against a register model and a PD source (late Request = hard reset = fail)
 make                 # = check + checkfm: synthetic flux decode via main/main_fm + check_flux.py
 ```
 
@@ -76,6 +77,7 @@ Floppsy RP2350 sketches (240MHz, TinyUSB). `floppsy_write_verify` is driven from
 - `Adafruit_Floppsy`: board helper for the Floppsy RP2350. It owns `drive0`/`drive1`, the level-shifter OE/DIR lines, and an INA3221 rail monitor. The header `#error`s unless `ARDUINO_ADAFRUIT_FLOPPSY_RP2350` is defined. `begin()` leaves the cable isolated; `enable(true)` connects it.
 - `Adafruit_FloppyFluxCapture` (RP2350 only): 25ns timestamps into PSRAM using two synchronized PIO state machines plus DMA, at 120 or 240MHz. Its PIO comes from `src/flux_capture.pio`; regenerate `flux_capture.pio.h` with pioasm rather than editing it (clang-format excludes `*.pio.h`).
 - `Adafruit_FloppySCP`: converts those timestamps to SCP files.
+- `Adafruit_FUSB302Sink` (pure C++, transport `Adafruit_FUSB302Bus`, Arduino adaptor `Adafruit_FUSB302Wire.h`): USB-PD sink on an FUSB302, polled (no INT_N). Asks for one fixed voltage (12 V by default), else 5 V; speaks PD 2.0; never sends a hard reset (that cuts VBUS), re-syncs with Soft_Reset after an MCU reboot. A source hard-resets if a Request is ~25 ms late, so poll() must run every few ms; `atari_sio_drive` runs it from a core-1 timer on the RP2350B board.
 - `Adafruit_FloppyImage`: read-only filesystem identification and root-directory listing over a caller-supplied byte reader. It covers FAT12 (PC/Atari ST), Amiga ADF, C64 D64, Apple DOS 3.3 and ProDOS. It never touches hardware and is host-tested by `check-catalog`.
 
 `examples/greaseweazle` is the Greaseweazle-compatible USB firmware, with per-board pin `#if` blocks. `examples/mfm_emu` emulates a drive (Xerox 820 by default).

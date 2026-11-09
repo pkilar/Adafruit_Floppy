@@ -25,6 +25,7 @@
 
 #include "ui.h"
 #include "ui_config.h"
+#include "usb_pd.h"
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -774,6 +775,9 @@ static void cmdHelp() {
       "                          bypass    not answered; use another drive on "
       "the SIO chain");
   helpLine("status", "units, drive model, SIO statistics");
+#if defined(PD_SDA_PIN)
+  helpLine("pd", "USB-PD state and what the charger offers");
+#endif
   Serial.println(
       "new <path> <fmt>          create a blank ATR; fmt as below, or\n"
       "                          <count>x<128|256|512>, e.g. 65535x512\n"
@@ -1298,6 +1302,10 @@ static void runCommand(char *s) {
     cmdSpeed(w, n);
   else if (!strcasecmp(w[0], "save"))
     cmdSave();
+#if defined(PD_SDA_PIN)
+  else if (!strcasecmp(w[0], "pd"))
+    pdPrint(Serial);
+#endif
   else
     Serial.println("Unknown command. Type help.");
 }
@@ -1515,7 +1523,12 @@ static void uiService() {
 // Core 1 runs the display and the encoder, with its own 8 KB stack
 // (arduino-pico reads this flag when it starts core 1).
 bool core1_separate_stack = true;
-void setup1() { uiSetup1(); }
+void setup1() {
+#if defined(PD_SDA_PIN)
+  pdSetup1(); // first: a charger waits only so long for the PD answer
+#endif
+  uiSetup1();
+}
 void loop1() { uiLoop1(); }
 #endif // OLED_SDA_PIN
 

@@ -9,7 +9,7 @@
 
 // The custom RP2350B board (floppy-rp2350b-pcb). Select it either by choosing
 // the "Generic RP2350" board in the Arduino IDE (which defines
-// ARDUINO_GENERIC_RP2350; also pick RP2350B and PSRAM CS GPIO 47), or by
+// ARDUINO_GENERIC_RP2350; also pick RP2350B and PSRAM CS GPIO 0), or by
 // building with -DFLOPPY_SIO_RP2350B_REVA for another board package.
 #if defined(FLOPPY_SIO_RP2350B_REVA) || defined(ARDUINO_GENERIC_RP2350)
 #define BOARD_FLOPPY_SIO_RP2350B
@@ -46,8 +46,18 @@
 #define ENCODER_A_PIN 40
 #define ENCODER_B_PIN 39
 #define ENCODER_SW_PIN 41
-// VBUS_PD through 100k/27k, 12 V present when above about 1.9 V
-#define VBUS_SENSE_PIN 46
+// USB-PD: FUSB302BMPX on I2C1 (Wire1), polled every PD_POLL_MS from core 1.
+// The drive's 12 V pin is switched on by the board once VBUS is above ~10 V.
+#define PD_SDA_PIN 46
+#define PD_SCL_PIN 47
+#define PD_I2C_ADDR 0x22
+#ifndef PD_REQUEST_MV
+#define PD_REQUEST_MV 12000
+#endif
+#ifndef PD_REQUEST_MA
+#define PD_REQUEST_MA 3000
+#endif
+#define PD_POLL_MS 3
 #define STATUS_LED_PIN 21
 #endif
 

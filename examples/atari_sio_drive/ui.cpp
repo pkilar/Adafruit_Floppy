@@ -22,6 +22,8 @@
 #include <string.h>
 #include <strings.h>
 
+#include "usb_pd.h"
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -233,7 +235,7 @@ bool dirty = true;
 uint32_t lastInput = 0;
 UiStatus st; // core 1's copy of the status
 uint32_t prevFrames = 0, tActivity = 0;
-char vbusText[6] = "";
+char vbusText[12] = "";
 
 // status screen: first unit shown
 int statusTop = 0;
@@ -864,11 +866,9 @@ void render(uint32_t now) {
 }
 
 void readVbus() {
-  float v = analogRead(VBUS_SENSE_PIN) * (3.3f / 4095.0f) / (27.0f / 127.0f);
-  if (v < 3.0f)
-    snprintf(vbusText, sizeof(vbusText), "--");
-  else
-    snprintf(vbusText, sizeof(vbusText), v > 8.9f ? "PD 12V" : "PD 5V");
+#if defined(PD_SDA_PIN)
+  pdShortStatus(vbusText, sizeof(vbusText));
+#endif
 }
 
 } // namespace
@@ -886,7 +886,6 @@ void uiSetup1() {
   attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), encoderIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_B_PIN), encoderIsr, CHANGE);
 
-  analogReadResolution(12);
 #if OLED_TYPE == OLED_SH1106_I2C
   Wire.setSDA(OLED_SDA_PIN);
   Wire.setSCL(OLED_SCL_PIN);
