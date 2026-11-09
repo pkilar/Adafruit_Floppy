@@ -54,23 +54,24 @@ and `ui_config.h`):
 
 | Function | GPIO |
 |---|---|
-| Floppy DENSITY, INDEX, SELECT, MOTOR, DIR, STEP | 8, 2, 9, 10, 11, 12 |
-| Floppy WRDATA, WRGATE, TRK0, PROT, READ, SIDE, READY | 13, 14, 4, 5, 3, 15, 6 |
-| SIO UART0 TX / RX, COMMAND | 16 / 17, 26 |
-| SIO PROCEED / INTERRUPT outputs (wired, not driven by the sketch yet) | 22 / 23 |
-| microSD SDIO CLK, CMD, DAT0 (DAT1-3 = 37-39), card detect | 34, 35, 36, 40 |
-| OLED SDA / SCL (I2C0, address 0x3C) | 28 / 29 |
-| Encoder A, B, switch (active low, external pull-ups) | 42, 44, 45 |
-| VBUS sense (ADC, 100k/27k), PD power good, status LED | 41, 43, 21 |
-| PSRAM chip select (QMI CS1) | 47 |
+| Floppy DENSITY, INDEX, SELECT, MOTOR, DIR, STEP | 3, 13, 2, 1, 6, 5 |
+| Floppy WRDATA, WRGATE, TRK0, PROT, READ, SIDE, READY | 8, 4, 14, 15, 16, 7, 18 |
+| SIO UART0 TX / RX, COMMAND | 12 / 17, 19 |
+| SIO PROCEED / INTERRUPT outputs (wired, not driven by the sketch yet) | 10 / 9 |
+| microSD SDIO CLK, CMD, DAT0 (DAT1-3 = 34-36), card detect | 37, 38, 33, 32 |
+| OLED SDA / SCL (I2C0, address 0x3C) | 44 / 45 |
+| SPI OLED SCK / MOSI (SPI1), CS, DC, RES | 42 / 43, 31, 30, 29 |
+| Encoder A, B, switch (active low, external pull-ups) | 40, 39, 41 |
+| VBUS sense (ADC, 100k/27k), PD power good, status LED | 46, 47, 21 |
+| PSRAM chip select (QMI CS1) | 0 |
 
 **Selecting the board.** In the Arduino IDE choose Tools > Board > Raspberry Pi
 Pico/RP2040/RP2350 > **Generic RP2350**, then set Variant chip = RP2350B,
-PSRAM CS = GPIO 47, Flash size to match the board's W25Q128 (16MB), USB Stack =
+PSRAM CS = GPIO 0, Flash size to match the board's W25Q128 (16MB), USB Stack =
 Adafruit TinyUSB. That board defines `ARDUINO_GENERIC_RP2350`, which selects
 the pin block automatically. With another board package, build with
 `-DFLOPPY_SIO_RP2350B_REVA`. The FQBN used for the compile checks is
-`rp2040:rp2040:generic_rp2350:variantchip=RP2350B,psramcs=GPIO47,flash=16777216_0,freq=150,arch=arm,dbgport=Disabled,dbglvl=None,usbstack=tinyusb`.
+`rp2040:rp2040:generic_rp2350:variantchip=RP2350B,psramcs=GPIO0,flash=16777216_0,freq=150,arch=arm,dbgport=Disabled,dbglvl=None,usbstack=tinyusb`.
 The user interface needs the Adafruit SH110X library (and Adafruit GFX).
 The status LED (GPIO21) blinks on SIO traffic; the SD card is started before
 anything claims a PIO, because SdFat's PIO SDIO needs to move the PIO's GPIO
@@ -142,14 +143,14 @@ commit. The TinyUSB stack is selected with `-DUSE_TINYUSB`. PlatformIO builds
 
 | Environment | Board |
 |---|---|
-| `floppy_sio_rp2350b` (default) | custom RP2350B board, SH1106 on I2C (`OLED_TYPE=1`), 150 MHz, 16 MB flash, PSRAM CS GPIO47 |
+| `floppy_sio_rp2350b` (default) | custom RP2350B board, SH1106 on I2C (`OLED_TYPE=1`), 150 MHz, 16 MB flash, PSRAM CS GPIO0 |
 | `floppy_sio_rp2350b_sh1106_spi` / `_ssd1306_spi` / `_ssd1309_spi` | the same with an SPI display (`OLED_TYPE` 2, 3, 4) |
 | `feather_rp2040`, `floppsy_rp2040`, `feather_rp2350` | Adafruit boards, 120 MHz, no UI |
 | `feather_m4_express` | Feather M4 Express, 120 MHz (uses the core's built-in TinyUSB) |
 
 The Floppsy RP2350 has no PlatformIO board definition, so it is not included.
 The custom board uses the stock `generic_rp2350` board with
-`-D__PICO_RP2350A=0` (RP2350B) and `-DRP2350_PSRAM_CS=47`.
+`-D__PICO_RP2350A=0` (RP2350B) and `-DRP2350_PSRAM_CS=0`.
 
 ```
 pio run -e floppy_sio_rp2350b                 # build

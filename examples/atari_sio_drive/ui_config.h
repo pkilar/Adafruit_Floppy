@@ -31,24 +31,23 @@
 #define OLED_TYPE OLED_SH1106_I2C
 #endif
 // I2C0, address 0x3C
-#define OLED_SDA_PIN 28
-#define OLED_SCL_PIN 29
+#define OLED_SDA_PIN 44
+#define OLED_SCL_PIN 45
 #define OLED_I2C_ADDR 0x3C
 // SPI1 (software chip select)
-#define OLED_SPI_SCK_PIN 30
-#define OLED_SPI_MOSI_PIN 31
-#define OLED_SPI_CS_PIN 32
-#define OLED_SPI_DC_PIN 33
-#define OLED_SPI_RES_PIN 27
+#define OLED_SPI_SCK_PIN 42
+#define OLED_SPI_MOSI_PIN 43
+#define OLED_SPI_CS_PIN 31
+#define OLED_SPI_DC_PIN 30
+#define OLED_SPI_RES_PIN 29
 #define OLED_SPI_HZ 8000000
 // EC11 rotary encoder; A, B and the switch are active low with external
-// pull-ups. On U1's right side, next to the encoder (board revision with the
-// microSD slot on the bottom edge).
-#define ENCODER_A_PIN 42
-#define ENCODER_B_PIN 44
-#define ENCODER_SW_PIN 45
+// pull-ups.
+#define ENCODER_A_PIN 40
+#define ENCODER_B_PIN 39
+#define ENCODER_SW_PIN 41
 // VBUS_PD through 100k/27k, 12 V present when above about 1.9 V
-#define VBUS_SENSE_PIN 41
+#define VBUS_SENSE_PIN 46
 #define STATUS_LED_PIN 21
 #endif
 

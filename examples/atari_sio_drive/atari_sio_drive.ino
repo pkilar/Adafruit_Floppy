@@ -106,27 +106,28 @@ const char CONFIG_PATH[] = "/ATARISIO.CFG";
 // The microSD card is on SDIO.
 #elif defined(BOARD_FLOPPY_SIO_RP2350B)
 // The custom RP2350B board (floppy-rp2350b-pcb); selection and the OLED and
-// encoder pins are in ui_config.h.
-#define DENSITY_PIN 8      // IDC 2
-#define INDEX_PIN 2        // IDC 8
-#define SELECT_PIN 9       // IDC 12
-#define MOTOR_PIN 10       // IDC 16
-#define DIR_PIN 11         // IDC 18
-#define STEP_PIN 12        // IDC 20
-#define WRDATA_PIN 13      // IDC 22
-#define WRGATE_PIN 14      // IDC 24
-#define TRK0_PIN 4         // IDC 26
-#define PROT_PIN 5         // IDC 28
-#define READ_PIN 3         // IDC 30
-#define SIDE_PIN 15        // IDC 32
-#define READY_PIN 6        // IDC 34
-#define SIO_UART_TX_PIN 16 // UART0, through the open-drain buffer
+// encoder pins are in ui_config.h. Pins follow the board's firmware_pins.h:
+// each signal leaves the RP2350B on the side facing its buffer or socket.
+#define DENSITY_PIN 3      // IDC 2
+#define INDEX_PIN 13       // IDC 8
+#define SELECT_PIN 2       // IDC 12
+#define MOTOR_PIN 1        // IDC 16
+#define DIR_PIN 6          // IDC 18
+#define STEP_PIN 5         // IDC 20
+#define WRDATA_PIN 8       // IDC 22
+#define WRGATE_PIN 4       // IDC 24
+#define TRK0_PIN 14        // IDC 26
+#define PROT_PIN 15        // IDC 28
+#define READ_PIN 16        // IDC 30
+#define SIDE_PIN 7         // IDC 32
+#define READY_PIN 18       // IDC 34
+#define SIO_UART_TX_PIN 12 // UART0, through the open-drain buffer
 #define SIO_UART_RX_PIN 17
-#define SIO_COMMAND_PIN 26
-// The microSD card is on SDIO (CLK 34, CMD 35, DAT0-3 36-39; card detect 40).
-#define PIN_SD_CLK 34
-#define PIN_SD_CMD 35
-#define PIN_SD_DAT0 36
+#define SIO_COMMAND_PIN 19
+// The microSD card is on SDIO (CLK 37, CMD 38, DAT0-3 33-36; card detect 32).
+#define PIN_SD_CLK 37
+#define PIN_SD_CMD 38
+#define PIN_SD_DAT0 33
 #else
 #error "Please set up pin definitions!"
 #endif
