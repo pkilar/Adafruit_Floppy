@@ -36,20 +36,21 @@ typedef struct mfm_io_settings {
   uint16_t gap_presync;
   uint8_t gap_byte;
   bool is_fm;
+  bool skip_iam; ///< Omit the index address mark (and gap_4a), e.g. Atari FM
 } mfm_io_settings_t;
 
 static const mfm_io_settings_t standard_mfm = {
-    50, 22, {32, 54, 84, 116, 255, 255, 255, 255}, 80, 12, 0x4e, false,
+    50, 22, {32, 54, 84, 116, 255, 255, 255, 255}, 80, 12, 0x4e, false, false,
 };
 
 static const mfm_io_settings_t standard_fm = {
-    26, 11, {27, 42, 58, 138, 255, 255, 255, 255}, 40, 6, 0xff, true,
+    26, 11, {27, 42, 58, 138, 255, 255, 255, 255}, 40, 6, 0xff, true, false,
 };
 
 // IBM 1.44 MB uses a longer inter-sector gap than the DD/1.2 MB layouts.
 // Match Greaseweazle's ibm.1440 layout without changing other 512-byte formats.
 static const mfm_io_settings_t standard_mfm_1440 = {
-    50, 22, {32, 54, 108, 116, 255, 255, 255, 255}, 80, 12, 0x4e, false,
+    50, 22, {32, 54, 108, 116, 255, 255, 255, 255}, 80, 12, 0x4e, false, false,
 };
 
 static inline const mfm_io_settings_t *
@@ -82,7 +83,8 @@ struct mfm_io {
   uint8_t
       *cylinder_ptr; ///< When decoding, the cylinder number read is stored here
   uint8_t head, cylinder; ///< Location of the track on disk
-  bool validate_id;  ///< When decoding MFM, require matching cylinder/head/size
+  bool validate_id; ///< When decoding MFM, require matching cylinder/head/size
+  bool any_head; ///< With validate_id, accept head 0 or 1 in the ID on head 1
   uint8_t pulse_len; ///< bookkeeping value used by MFM decoder
   uint8_t y;         ///< bookkeeping value used by MFM encoder
   uint8_t n; ///< Sector size value. Sector is (128<<n) bytes big. Valid values
@@ -96,7 +98,20 @@ struct mfm_io {
   void (*encode_raw)(
       mfm_io_t *io,
       uint8_t b); ///< can be mfm_io_encode_raw_fm or mfm_io_encode_raw_mfm
+  const uint8_t *sector_order; ///< When encoding, if non-NULL, physical sector
+                               ///< i is written from logical slot
+                               ///< sector_order[i] (0-based, IDAM sector
+                               ///< number is slot+1). NULL = sequential
 };
+
+// Head number check for strict ID validation (any_head: head 1 may carry 0 or
+// 1)
+MFM_MAYBE_UNUSED
+static bool mfm_io_head_ok(const mfm_io_t *io, uint8_t id_head) {
+  if (id_head == io->head)
+    return true;
+  return io->any_head && io->head == 1 && id_head == 0;
+}
 
 typedef enum {
   mfm_io_pulse_10,
@@ -345,8 +360,9 @@ static size_t decode_track_mfm(mfm_io_t *io) {
       continue;
     }
 
-    if (io->validate_id && (idam_buf[0] != io->cylinder ||
-                            idam_buf[1] != io->head || idam_buf[3] != io->n)) {
+    if (io->validate_id &&
+        (idam_buf[0] != io->cylinder || !mfm_io_head_ok(io, idam_buf[1]) ||
+         idam_buf[3] != io->n)) {
       continue;
     }
     size_t r = (uint8_t)idam_buf[2] - 1; // sectors are 1-based
@@ -378,6 +394,151 @@ static size_t decode_track_mfm(mfm_io_t *io) {
       *io->cylinder_ptr = idam_buf[0];
     io->sector_validity[r] = 1;
     io->n_valid++;
+  }
+  return io->n_valid;
+}
+
+// FM address marks are a data byte written with a deliberately missing clock
+// pattern (clock 0xc7). As 16 raw cells (clock bit first, then data bit, MSB
+// first) they are:
+enum {
+  mfm_io_fm_idam_cells = 0xf57e, // data 0xfe
+  mfm_io_fm_dam_cells = 0xf56f,  // data 0xfb
+  mfm_io_fm_ddam_cells = 0xf56a, // data 0xf8 (deleted data mark)
+};
+
+// Convert the next flux interval into a length in FM cells (1, 2 or 3).
+// Boundaries are at 1.5 and 2.5 cells of T1_nom. As in mfm_io_read_symbol, part
+// of the timing error is carried to the next interval (a late transition
+// lengthens one interval and shortens the next), limited to half a cell.
+static inline unsigned mfm_io_fm_read_interval(mfm_io_t *io) {
+  int t1 = io->T1_nom;
+  int pulse_len = io->pulses[io->pos++] + io->phase_error;
+  unsigned cells = pulse_len * 2 < 3 * t1 ? 1 : pulse_len * 2 < 5 * t1 ? 2 : 3;
+  int error = (pulse_len - (int)cells * t1) / 2;
+  int limit = t1 / 2;
+  if (error > limit)
+    error = limit;
+  if (error < -limit)
+    error = -limit;
+  io->phase_error = error;
+  return cells;
+}
+
+// Return the next raw cell (1 = flux transition), or -1 at the end of the
+// data. `run` holds the number of cells left in the current flux interval.
+static inline int mfm_io_fm_read_cell(mfm_io_t *io, unsigned *run) {
+  if (*run == 0) {
+    if (mfm_io_eof(io))
+      return -1;
+    *run = mfm_io_fm_read_interval(io);
+  }
+  return --*run == 0;
+}
+
+// Read n data bytes (16 cells each, the data bits are the odd cells), feeding
+// them to the crc. Returns false if the flux ends first.
+static bool mfm_io_fm_read_bytes(mfm_io_t *io, unsigned *run, uint8_t *buf,
+                                 size_t n, uint16_t *crc) {
+  uint16_t c = *crc;
+  for (size_t i = 0; i < n; i++) {
+    unsigned w = 0;
+    for (int j = 0; j < 16; j++) {
+      int cell = mfm_io_fm_read_cell(io, run);
+      if (cell < 0)
+        return false;
+      w = (w << 1) | cell;
+    }
+    // gather the 8 data bits (even bit positions) into a byte
+    w &= 0x5555;
+    w = (w | (w >> 1)) & 0x3333;
+    w = (w | (w >> 2)) & 0x0f0f;
+    w = (w | (w >> 4)) & 0x00ff;
+    buf[i] = w;
+    c = mfm_io_crc16_table[buf[i] ^ (uint8_t)(c >> 8)] ^ (c << 8);
+  }
+  *crc = c;
+  return true;
+}
+
+// Read a whole FM track, with the same contract as decode_track_mfm: sector
+// data and validity[] are 0-based (IDAM sector number - 1), sectors that are
+// already valid are kept, and decoding stops once all n_sectors are valid.
+// Address marks are found by their missing-clock cell patterns; a data (or
+// deleted data) mark is only accepted right after a good matching IDAM.
+MFM_MAYBE_UNUSED
+static size_t decode_track_fm(mfm_io_t *io) {
+  io->pos = 0;
+  io->phase_error = 0;
+
+  io->n_valid = 0;
+  for (size_t i = 0; i < io->n_sectors; i++)
+    if (io->sector_validity[i])
+      io->n_valid += 1;
+
+  size_t io_block_size = 128 << io->n;
+  uint8_t idam_buf[mfm_io_idam_size + mfm_io_crc_size];
+  uint8_t crc_buf[mfm_io_crc_size];
+  uint32_t cells = 0;
+  unsigned run = 0;
+  bool have_idam = false; // the last IDAM was good and its sector is wanted
+  size_t r = 0;
+  uint8_t cylinder = 0;
+
+  while (io->n_valid < io->n_sectors) {
+    int cell = mfm_io_fm_read_cell(io, &run);
+    if (cell < 0)
+      break;
+    cells = (cells << 1) | cell;
+
+    uint8_t mark;
+    switch (cells & 0xffff) {
+    case mfm_io_fm_idam_cells:
+      mark = MFM_IO_IDAM;
+      break;
+    case mfm_io_fm_dam_cells:
+      mark = MFM_IO_DAM;
+      break;
+    case mfm_io_fm_ddam_cells:
+      mark = 0xf8;
+      break;
+    default:
+      continue;
+    }
+    cells = 0;
+
+    uint16_t crc = mfm_io_crc16(&mark, 1, 0xffff);
+    if (mark == MFM_IO_IDAM) {
+      have_idam = false;
+      if (!mfm_io_fm_read_bytes(io, &run, idam_buf, sizeof(idam_buf), &crc))
+        break;
+      if (crc != 0)
+        continue;
+      // IDAM is cylinder, head, sector, "n"; see decode_track_mfm
+      if (io->validate_id &&
+          (idam_buf[0] != io->cylinder || !mfm_io_head_ok(io, idam_buf[1]) ||
+           idam_buf[3] != io->n))
+        continue;
+      r = (size_t)idam_buf[2] - 1; // sectors are 1-based
+      if (r >= io->n_sectors || io->sector_validity[r])
+        continue;
+      cylinder = idam_buf[0];
+      have_idam = true;
+    } else {
+      if (!have_idam)
+        continue;
+      have_idam = false;
+      if (!mfm_io_fm_read_bytes(io, &run, io->sectors + io_block_size * r,
+                                io_block_size, &crc) ||
+          !mfm_io_fm_read_bytes(io, &run, crc_buf, sizeof(crc_buf), &crc))
+        break;
+      if (crc != 0)
+        continue;
+      if (io->cylinder_ptr)
+        *io->cylinder_ptr = cylinder;
+      io->sector_validity[r] = 1;
+      io->n_valid++;
+    }
   }
   return io->n_valid;
 }
@@ -571,14 +732,18 @@ static size_t encode_track_mfm(mfm_io_t *io) {
 
   unsigned char buf[mfm_io_idam_size + 1];
 
-  mfm_io_encode_iam(io);
+  if (!io->settings->skip_iam)
+    mfm_io_encode_iam(io);
 
   mfm_io_encode_gap_and_sync(io, io->settings->gap_1);
   for (size_t i = 0; i < io->n_sectors; i++) {
+    // physical position i holds logical slot `slot`
+    size_t slot = io->sector_order ? io->sector_order[i] : i;
+    DEBUG_ASSERT(slot < io->n_sectors);
     buf[0] = MFM_IO_IDAM;
     buf[1] = io->cylinder;
     buf[2] = io->head;
-    buf[3] = i + 1; // sectors are 1-based
+    buf[3] = slot + 1; // sectors are 1-based
     buf[4] = io->n;
 
     mfm_io_crc_preload(io);
@@ -598,7 +763,8 @@ static size_t encode_track_mfm(mfm_io_t *io) {
       mfm_io_encode_byte_crc(io, MFM_IO_DAM);
     }
     size_t io_block_size = 128 << io->n;
-    mfm_io_encode_buf_crc(io, &io->sectors[io_block_size * i], io_block_size);
+    mfm_io_encode_buf_crc(io, &io->sectors[io_block_size * slot],
+                          io_block_size);
     mfm_io_encode_crc(io);
 
     // There is no following sector after the final CRC. Fill its remaining
